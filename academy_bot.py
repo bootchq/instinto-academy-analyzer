@@ -483,8 +483,10 @@ class AcademyBot:
 
     async def run(self):
         """Запускает бота."""
+        # Удаляем webhook если был и сбрасываем старые апдейты
+        await self.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Бот запущен")
-        await self.dp.start_polling(self.bot)
+        await self.dp.start_polling(self.bot, allowed_updates=["message", "callback_query"])
 
 
 async def main():
