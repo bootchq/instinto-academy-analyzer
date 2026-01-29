@@ -1,0 +1,377 @@
+"""
+Анализ чатов менеджеров через Groq (Llama 3.3).
+Версия для Railway с Telegram уведомлениями.
+
+Переменные окружения:
+    GROQ_API_KEY=gsk_...
+    GOOGLE_SHEETS_ID=1to83Pw9vjl6p1RnnrJT-qtHc85x5s2U_qYp6jSZKhYM
+    GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}  # JSON строка
+    TELEGRAM_BOT_TOKEN=...      # Для уведомлений
+    TELEGRAM_CHAT_ID=...        # Куда слать уведомления
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import traceback
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from sheets import open_spreadsheet, upsert_worksheet, append_to_worksheet, dicts_to_table
+
+
+# Промпт для анализа чата
+ANALYSIS_PROMPT = """Ты эксперт по продажам премиального женского белья бренда INSTINTO.
+Проанализируй диалог менеджера с клиентом.
+
+КОНТЕКСТ БРЕНДА:
+- Премиальное женское бельё, dark luxury
+- Ценовой сегмент: средний+
+- Целевая аудитория: женщины 25-45
+
+СЕГМЕНТЫ КЛИЕНТОВ:
+1. Невесты - подготовка к свадьбе
+2. После родов - возвращение к себе
+3. Пары - вернуть искру
+4. Экспериментаторы - новые ощущения
+5. Подарки - ищут подарок
+6. Новая версия себя - трансформация
+7. Соло - муж в отъезде
+8. Путешественницы - для поездок
+
+ЭТАПЫ ПРОДАЖИ:
+1. Приветствие и установление контакта
+2. Выявление потребностей
+3. Презентация продукта
+4. Работа с возражениями
+5. Закрытие сделки
+6. Допродажа (cross-sell)
+
+ЗАДАЧА:
+1. Определи сегмент клиента по сигналам из диалога
+2. Оцени каждый этап продажи (1-10, где 10 = идеально)
+3. Выдели техники, которые использовал менеджер
+4. Укажи упущенные возможности
+5. Проверь на манипулятивные практики (давление, ложная срочность)
+
+ДИАЛОГ:
+{dialog}
+
+Ответь ТОЛЬКО в JSON формате (без markdown):
+{{
+  "customer_segment": "название сегмента или unknown",
+  "customer_signals": ["сигнал 1", "сигнал 2"],
+  "scores": {{
+    "greeting": 7,
+    "needs_discovery": 5,
+    "presentation": 6,
+    "objection_handling": 4,
+    "closing": 6,
+    "cross_sell": 3
+  }},
+  "overall_score": 5.2,
+  "techniques_used": [
+    {{"technique": "название", "example": "цитата из диалога"}}
+  ],
+  "missed_opportunities": ["что можно было сделать лучше"],
+  "manipulation_flags": [],
+  "is_ethical": true,
+  "summary": "Краткое резюме диалога в 1-2 предложения"
+}}"""
+
+
+class TelegramNotifier:
+    """Отправляет уведомления в Telegram."""
+
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+
+    def send(self, message: str) -> bool:
+        """Отправить сообщение."""
+        if not self.bot_token or not self.chat_id:
+            return False
+        try:
+            resp = requests.post(
+                f"{self.base_url}/sendMessage",
+                json={"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"},
+                timeout=10
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+
+class GroqClient:
+    """Клиент для Groq API."""
+
+    BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile"):
+        self.api_key = api_key
+        self.model = model
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        })
+
+    def chat(self, prompt: str, max_tokens: int = 2000) -> str:
+        """Отправить запрос к Groq."""
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.3,
+        }
+
+        for attempt in range(3):
+            try:
+                resp = self.session.post(self.BASE_URL, json=payload, timeout=60)
+
+                if resp.status_code == 429:
+                    wait = 60 if attempt == 0 else 120
+                    print(f"  Rate limit, жду {wait}с...")
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+
+            except requests.exceptions.RequestException as e:
+                if attempt < 2:
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                raise RuntimeError(f"Groq API error: {e}")
+
+        raise RuntimeError("Groq API: превышено число попыток")
+
+
+def format_dialog(messages: List[Dict[str, Any]]) -> str:
+    """Форматирует сообщения в текст диалога."""
+    lines = []
+    for msg in messages:
+        direction = msg.get("direction", "")
+        text = msg.get("text", "").strip()
+        if not text:
+            continue
+
+        role = "Клиент" if direction == "in" else "Менеджер"
+        lines.append(f"{role}: {text}")
+
+    return "\n".join(lines)
+
+
+def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
+    """Парсит JSON из ответа LLM."""
+    import re
+    text = response.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
+    """Загружает чаты и сообщения из Google Sheets."""
+
+    try:
+        chats_ws = ss.worksheet("chats_raw")
+        chats_data = chats_ws.get_all_records()
+    except Exception as e:
+        print(f"Ошибка чтения chats_raw: {e}")
+        return []
+
+    try:
+        messages_ws = ss.worksheet("messages_raw")
+        messages_data = messages_ws.get_all_records()
+    except Exception as e:
+        print(f"Ошибка чтения messages_raw: {e}")
+        return []
+
+    messages_by_chat: Dict[str, List[Dict]] = {}
+    for msg in messages_data:
+        chat_id = str(msg.get("chat_id", ""))
+        if chat_id:
+            messages_by_chat.setdefault(chat_id, []).append(msg)
+
+    result = []
+    for chat in chats_data[:limit]:
+        chat_id = str(chat.get("chat_id", ""))
+        if not chat_id:
+            continue
+
+        messages = messages_by_chat.get(chat_id, [])
+        if len(messages) < 2:
+            continue
+
+        messages.sort(key=lambda m: m.get("sent_at", ""))
+
+        result.append({
+            "chat_id": chat_id,
+            "chat": chat,
+            "messages": messages
+        })
+
+    return result
+
+
+def load_analyzed_chat_ids(ss) -> set:
+    """Загружает ID уже проанализированных чатов."""
+    try:
+        ws = ss.worksheet("analysis_raw")
+        data = ws.get_all_records()
+        return {str(row.get("chat_id", "")) for row in data if row.get("chat_id")}
+    except Exception:
+        return set()
+
+
+def main():
+    # Настройка уведомлений
+    telegram = TelegramNotifier(
+        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        chat_id=os.environ.get("TELEGRAM_CHAT_ID", "")
+    )
+
+    try:
+        # Проверяем ключи
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if not groq_key:
+            raise ValueError("GROQ_API_KEY не задан")
+
+        sheets_id = os.environ.get("GOOGLE_SHEETS_ID")
+        sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if not sheets_id or not sa_json:
+            raise ValueError("GOOGLE_SHEETS_ID или GOOGLE_SERVICE_ACCOUNT_JSON не заданы")
+
+        # Подключаемся
+        print("Подключаюсь к Google Sheets...")
+        ss = open_spreadsheet(spreadsheet_id=sheets_id, service_account_json_path=sa_json)
+
+        print("Инициализирую Groq...")
+        groq = GroqClient(groq_key)
+
+        # Загружаем чаты
+        print("Загружаю чаты...")
+        chats = load_chats_from_sheets(ss, limit=100)
+        print(f"   Найдено чатов: {len(chats)}")
+
+        analyzed_ids = load_analyzed_chat_ids(ss)
+        print(f"   Уже проанализировано: {len(analyzed_ids)}")
+
+        new_chats = [c for c in chats if c["chat_id"] not in analyzed_ids]
+        print(f"   Новых для анализа: {len(new_chats)}")
+
+        if not new_chats:
+            telegram.send("Академия INSTINTO: новых чатов для анализа нет")
+            print("Все чаты уже проанализированы!")
+            return
+
+        # Анализируем
+        results = []
+        errors = 0
+        for i, item in enumerate(new_chats, 1):
+            chat_id = item["chat_id"]
+            chat = item["chat"]
+            messages = item["messages"]
+
+            print(f"\n[{i}/{len(new_chats)}] Анализирую чат {chat_id}...")
+
+            dialog_text = format_dialog(messages)
+            if len(dialog_text) < 50:
+                print(f"  Пропускаю — слишком короткий диалог")
+                continue
+
+            if len(dialog_text) > 8000:
+                dialog_text = dialog_text[:8000] + "\n[...диалог обрезан...]"
+
+            prompt = ANALYSIS_PROMPT.format(dialog=dialog_text)
+
+            try:
+                response = groq.chat(prompt)
+                analysis = parse_llm_response(response)
+
+                if not analysis:
+                    print(f"  Ошибка парсинга ответа LLM")
+                    errors += 1
+                    continue
+
+                scores = analysis.get("scores", {})
+                result = {
+                    "chat_id": chat_id,
+                    "manager_id": chat.get("manager_id", ""),
+                    "manager_name": chat.get("manager_name", ""),
+                    "channel": chat.get("channel", ""),
+                    "customer_segment": analysis.get("customer_segment", "unknown"),
+                    "overall_score": analysis.get("overall_score", 0),
+                    "greeting_score": scores.get("greeting", 0),
+                    "needs_score": scores.get("needs_discovery", 0),
+                    "presentation_score": scores.get("presentation", 0),
+                    "objection_score": scores.get("objection_handling", 0),
+                    "closing_score": scores.get("closing", 0),
+                    "cross_sell_score": scores.get("cross_sell", 0),
+                    "techniques": json.dumps(analysis.get("techniques_used", []), ensure_ascii=False),
+                    "missed_opportunities": json.dumps(analysis.get("missed_opportunities", []), ensure_ascii=False),
+                    "is_ethical": analysis.get("is_ethical", True),
+                    "summary": analysis.get("summary", ""),
+                }
+                results.append(result)
+
+                print(f"  Сегмент: {result['customer_segment']}, оценка: {result['overall_score']}")
+                time.sleep(2)
+
+            except Exception as e:
+                print(f"  Ошибка: {e}")
+                errors += 1
+                continue
+
+        # Записываем результаты
+        if results:
+            print(f"\nЗаписываю {len(results)} результатов в Google Sheets...")
+
+            header = [
+                "chat_id", "manager_id", "manager_name", "channel",
+                "customer_segment", "overall_score",
+                "greeting_score", "needs_score", "presentation_score",
+                "objection_score", "closing_score", "cross_sell_score",
+                "techniques", "missed_opportunities", "is_ethical", "summary"
+            ]
+
+            rows = dicts_to_table(results, header=header)
+            append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
+
+            # Уведомление об успехе
+            msg = f"<b>Академия INSTINTO</b>\n\nАнализ завершён:\n- Проанализировано: {len(results)} чатов\n- Ошибок: {errors}"
+            telegram.send(msg)
+            print("Готово!")
+        else:
+            telegram.send("Академия INSTINTO: анализ завершён, но результатов нет (ошибки парсинга)")
+            print("Нет результатов для записи")
+
+    except Exception as e:
+        # Уведомление об ошибке
+        error_msg = f"<b>Академия INSTINTO</b>\n\nОшибка анализа:\n<pre>{traceback.format_exc()[-500:]}</pre>"
+        telegram.send(error_msg)
+        print(f"Критическая ошибка: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
