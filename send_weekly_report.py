@@ -46,15 +46,23 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    def send(self, message: str, parse_mode: str = "HTML") -> bool:
+    def send(self, message: str, parse_mode: str = "HTML", reply_markup: dict = None) -> bool:
         """Отправить сообщение."""
         if not self.bot_token or not self.chat_id:
             print("Telegram не настроен (нет токена или chat_id)")
             return False
         try:
+            payload = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": parse_mode
+            }
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+
             resp = requests.post(
                 f"{self.base_url}/sendMessage",
-                json={"chat_id": self.chat_id, "text": message, "parse_mode": parse_mode},
+                json=payload,
                 timeout=10
             )
             if resp.status_code != 200:
@@ -63,6 +71,34 @@ class TelegramNotifier:
         except Exception as e:
             print(f"Ошибка отправки в Telegram: {e}")
             return False
+
+    def send_with_module_buttons(self, message: str, skill_keys: List[str]) -> bool:
+        """Отправить сообщение с inline-кнопками модулей."""
+        # Маппинг skill_key -> module_id
+        skill_to_module = {
+            "greeting_score": "greeting",
+            "needs_score": "needs_discovery",
+            "presentation_score": "presentation",
+            "objection_score": "objection_handling",
+            "closing_score": "closing",
+            "cross_sell_score": "cross_sell",
+        }
+
+        buttons = []
+        for skill_key in skill_keys:
+            module_id = skill_to_module.get(skill_key)
+            if module_id:
+                skill_name = SKILL_NAMES.get(skill_key, skill_key)
+                buttons.append([{
+                    "text": f"📚 Пройти: {skill_name}",
+                    "callback_data": f"module:{module_id}"
+                }])
+
+        if not buttons:
+            return self.send(message)
+
+        reply_markup = {"inline_keyboard": buttons}
+        return self.send(message, reply_markup=reply_markup)
 
 
 def load_analysis_data(ss, days: int = 7) -> List[Dict[str, Any]]:
@@ -268,8 +304,12 @@ def main():
             print(report)
             print("---\n")
 
-            # Отправляем в Telegram (пока на общий chat_id для теста)
-            if telegram.send(f"Менеджер: {m['manager_name']}\n\n" + report):
+            # Собираем skill_keys из слабых мест для кнопок модулей
+            skill_keys = [skill_key for skill_key, _ in weakest]
+
+            # Отправляем в Telegram с inline-кнопками модулей
+            full_report = f"Менеджер: {m['manager_name']}\n\n" + report
+            if telegram.send_with_module_buttons(full_report, skill_keys):
                 reports_sent += 1
 
         print(f"Отправлено отчётов: {reports_sent}")
