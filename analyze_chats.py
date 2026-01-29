@@ -2,6 +2,11 @@
 Анализ чатов менеджеров через Groq (Llama 3.3).
 Версия для Railway с Telegram уведомлениями.
 
+Логика повторного анализа:
+- Новый чат → анализируем
+- Появились новые сообщения → переанализируем
+- Изменился статус (оплачен/отменён/закрыт) → переанализируем
+
 Переменные окружения:
     GROQ_API_KEY=gsk_...
     GOOGLE_SHEETS_ID=1to83Pw9vjl6p1RnnrJT-qtHc85x5s2U_qYp6jSZKhYM
@@ -17,7 +22,8 @@ import os
 import sys
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -233,14 +239,48 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
     return result
 
 
-def load_analyzed_chat_ids(ss) -> set:
-    """Загружает ID уже проанализированных чатов."""
+def load_analyzed_chats(ss) -> Dict[str, Dict[str, Any]]:
+    """
+    Загружает данные о проанализированных чатах.
+    Возвращает dict: chat_id -> {message_count, chat_status, row_index}
+    """
     try:
         ws = ss.worksheet("analysis_raw")
         data = ws.get_all_records()
-        return {str(row.get("chat_id", "")) for row in data if row.get("chat_id")}
+        result = {}
+        for i, row in enumerate(data):
+            chat_id = str(row.get("chat_id", ""))
+            if chat_id:
+                result[chat_id] = {
+                    "message_count": int(row.get("message_count", 0)),
+                    "chat_status": str(row.get("chat_status", "")),
+                    "row_index": i + 2,  # +2: заголовок + 0-based index
+                }
+        return result
     except Exception:
-        return set()
+        return {}
+
+
+def needs_reanalysis(chat_id: str, current_msg_count: int, current_status: str,
+                     analyzed: Dict[str, Dict]) -> Tuple[bool, str]:
+    """
+    Проверяет, нужен ли повторный анализ.
+    Возвращает (нужен_ли, причина).
+    """
+    if chat_id not in analyzed:
+        return True, "новый"
+
+    prev = analyzed[chat_id]
+    prev_count = prev.get("message_count", 0)
+    prev_status = prev.get("chat_status", "")
+
+    if current_msg_count > prev_count:
+        return True, f"новые сообщения ({prev_count}→{current_msg_count})"
+
+    if current_status != prev_status and current_status:
+        return True, f"статус изменён ({prev_status}→{current_status})"
+
+    return False, ""
 
 
 def main():
@@ -270,29 +310,45 @@ def main():
 
         # Загружаем чаты
         print("Загружаю чаты...")
-        chats = load_chats_from_sheets(ss, limit=100)
+        chats = load_chats_from_sheets(ss, limit=200)
         print(f"   Найдено чатов: {len(chats)}")
 
-        analyzed_ids = load_analyzed_chat_ids(ss)
-        print(f"   Уже проанализировано: {len(analyzed_ids)}")
+        analyzed = load_analyzed_chats(ss)
+        print(f"   Уже проанализировано: {len(analyzed)}")
 
-        new_chats = [c for c in chats if c["chat_id"] not in analyzed_ids]
-        print(f"   Новых для анализа: {len(new_chats)}")
+        # Фильтруем: новые + изменённые
+        chats_to_analyze = []
+        for c in chats:
+            chat_id = c["chat_id"]
+            msg_count = len(c["messages"])
+            chat_status = c["chat"].get("status", "") or c["chat"].get("outcome", "")
 
-        if not new_chats:
-            telegram.send("Академия INSTINTO: новых чатов для анализа нет")
-            print("Все чаты уже проанализированы!")
+            need, reason = needs_reanalysis(chat_id, msg_count, chat_status, analyzed)
+            if need:
+                c["reanalysis_reason"] = reason
+                c["message_count"] = msg_count
+                c["chat_status"] = chat_status
+                chats_to_analyze.append(c)
+
+        new_count = sum(1 for c in chats_to_analyze if c["reanalysis_reason"] == "новый")
+        updated_count = len(chats_to_analyze) - new_count
+        print(f"   Новых: {new_count}, обновлённых: {updated_count}")
+
+        if not chats_to_analyze:
+            telegram.send("Академия INSTINTO: новых/изменённых чатов нет")
+            print("Нет чатов для анализа!")
             return
 
         # Анализируем
         results = []
         errors = 0
-        for i, item in enumerate(new_chats, 1):
+        for i, item in enumerate(chats_to_analyze, 1):
             chat_id = item["chat_id"]
             chat = item["chat"]
             messages = item["messages"]
+            reason = item["reanalysis_reason"]
 
-            print(f"\n[{i}/{len(new_chats)}] Анализирую чат {chat_id}...")
+            print(f"\n[{i}/{len(chats_to_analyze)}] Анализирую чат {chat_id} ({reason})...")
 
             dialog_text = format_dialog(messages)
             if len(dialog_text) < 50:
@@ -319,6 +375,8 @@ def main():
                     "manager_id": chat.get("manager_id", ""),
                     "manager_name": chat.get("manager_name", ""),
                     "channel": chat.get("channel", ""),
+                    "message_count": item["message_count"],
+                    "chat_status": item["chat_status"],
                     "customer_segment": analysis.get("customer_segment", "unknown"),
                     "overall_score": analysis.get("overall_score", 0),
                     "greeting_score": scores.get("greeting", 0),
@@ -331,6 +389,7 @@ def main():
                     "missed_opportunities": json.dumps(analysis.get("missed_opportunities", []), ensure_ascii=False),
                     "is_ethical": analysis.get("is_ethical", True),
                     "summary": analysis.get("summary", ""),
+                    "analyzed_at": datetime.utcnow().isoformat(),
                 }
                 results.append(result)
 
@@ -348,17 +407,26 @@ def main():
 
             header = [
                 "chat_id", "manager_id", "manager_name", "channel",
+                "message_count", "chat_status",
                 "customer_segment", "overall_score",
                 "greeting_score", "needs_score", "presentation_score",
                 "objection_score", "closing_score", "cross_sell_score",
-                "techniques", "missed_opportunities", "is_ethical", "summary"
+                "techniques", "missed_opportunities", "is_ethical", "summary",
+                "analyzed_at"
             ]
 
             rows = dicts_to_table(results, header=header)
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
             # Уведомление об успехе
-            msg = f"<b>Академия INSTINTO</b>\n\nАнализ завершён:\n- Проанализировано: {len(results)} чатов\n- Ошибок: {errors}"
+            msg = (
+                f"<b>Академия INSTINTO</b>\n\n"
+                f"Анализ завершён:\n"
+                f"- Новых чатов: {new_count}\n"
+                f"- Обновлённых: {updated_count}\n"
+                f"- Проанализировано: {len(results)}\n"
+                f"- Ошибок: {errors}"
+            )
             telegram.send(msg)
             print("Готово!")
         else:
