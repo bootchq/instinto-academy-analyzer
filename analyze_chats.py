@@ -145,9 +145,16 @@ class GroqClient:
                 resp = self.session.post(self.BASE_URL, json=payload, timeout=90)
 
                 if resp.status_code == 429:
-                    # Экспоненциальный backoff: 30, 60, 120, 240, 480 секунд
-                    wait = 30 * (2 ** attempt)
-                    print(f"  Rate limit, жду {wait}с (попытка {attempt + 1}/5)...")
+                    # Логируем headers для диагностики
+                    retry_after = resp.headers.get("retry-after", "?")
+                    limit_requests = resp.headers.get("x-ratelimit-limit-requests", "?")
+                    remaining = resp.headers.get("x-ratelimit-remaining-requests", "?")
+                    reset = resp.headers.get("x-ratelimit-reset-requests", "?")
+                    print(f"  Rate limit headers: retry={retry_after}s, limit={limit_requests}, remaining={remaining}, reset={reset}")
+
+                    # Экспоненциальный backoff: 60, 120, 240, 480 секунд
+                    wait = 60 * (2 ** attempt)
+                    print(f"  Жду {wait}с (попытка {attempt + 1}/5)...")
                     time.sleep(wait)
                     continue
 
@@ -373,10 +380,12 @@ def main():
 
             try:
                 response = groq.chat(prompt)
+                # Логируем первые 200 символов для диагностики
+                print(f"  LLM ответ (начало): {response[:200]}...")
                 analysis = parse_llm_response(response)
 
                 if not analysis:
-                    print(f"  Ошибка парсинга ответа LLM")
+                    print(f"  Ошибка парсинга ответа LLM. Полный ответ: {response[:500]}")
                     errors += 1
                     continue
 
