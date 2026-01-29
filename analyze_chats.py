@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # Лимит чатов за один запуск (Groq rate limit)
-MAX_CHATS_PER_RUN = 30
+MAX_CHATS_PER_RUN = 50
 
 import requests
 
