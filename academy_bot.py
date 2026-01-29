@@ -32,11 +32,22 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from sheets import open_spreadsheet, append_to_worksheet
+from sheets import (
+    open_spreadsheet,
+    append_to_worksheet,
+    get_user,
+    create_access_request,
+    approve_user,
+    reject_user,
+    get_pending_requests
+)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Супер-админ (может одобрять заявки)
+ADMIN_ID = 57186925
 
 # Загружаем модули
 MODULES_PATH = Path(__file__).parent / "modules" / "learning_modules.json"
@@ -73,8 +84,14 @@ class AcademyBot:
         # Команды
         self.dp.message.register(self.cmd_start, Command("start"))
         self.dp.message.register(self.cmd_modules, Command("modules"))
+        self.dp.message.register(self.cmd_pending, Command("pending"))
 
-        # Callbacks
+        # Callbacks: система доступа
+        self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
+        self.dp.callback_query.register(self.on_approve, F.data.startswith("approve:"))
+        self.dp.callback_query.register(self.on_reject, F.data.startswith("reject:"))
+
+        # Callbacks: обучение
         self.dp.callback_query.register(self.on_module_start, F.data.startswith("module:"))
         self.dp.callback_query.register(self.on_quiz_answer, F.data.startswith("quiz:"))
 
@@ -90,15 +107,75 @@ class AcademyBot:
 
     async def cmd_start(self, message: Message):
         """Обработчик /start."""
-        await message.answer(
-            "Привет! Я бот Академии INSTINTO.\n\n"
-            "Я помогу тебе прокачать навыки продаж.\n\n"
-            "Команды:\n"
-            "/modules — список модулей обучения"
-        )
+        user_id = message.from_user.id
+
+        # Админ всегда имеет доступ
+        if user_id == ADMIN_ID:
+            await message.answer(
+                "Привет, админ! Ты управляешь Академией INSTINTO.\n\n"
+                "Команды:\n"
+                "/modules — список модулей обучения\n"
+                "/pending — заявки на рассмотрении"
+            )
+            return
+
+        # Проверяем пользователя в базе
+        user = get_user(self.spreadsheet, user_id)
+
+        if user is None:
+            # Новый пользователь — предлагаем запросить доступ
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Запросить доступ", callback_data="request_access")
+            ]])
+            await message.answer(
+                "Привет! Я бот Академии INSTINTO.\n\n"
+                "Для доступа к обучению нужно одобрение администратора.",
+                reply_markup=keyboard
+            )
+            return
+
+        status = user.get("status", "")
+        role = user.get("role", "")
+
+        if status == "pending":
+            await message.answer(
+                "Твоя заявка на рассмотрении.\n"
+                "Как только администратор одобрит — я напишу тебе."
+            )
+            return
+
+        if status == "rejected":
+            await message.answer("К сожалению, твоя заявка была отклонена.")
+            return
+
+        if status == "approved":
+            role_text = {
+                "manager": "менеджер",
+                "team_lead": "руководитель",
+                "admin": "администратор"
+            }.get(role, role)
+
+            await message.answer(
+                f"С возвращением! Твоя роль: {role_text}\n\n"
+                "Команды:\n"
+                "/modules — список модулей обучения"
+            )
+            return
+
+        # Неизвестный статус
+        await message.answer("Что-то пошло не так. Напиши администратору.")
 
     async def cmd_modules(self, message: Message):
         """Показывает список модулей."""
+        user_id = message.from_user.id
+
+        # Проверяем доступ (админ или approved пользователь)
+        if user_id != ADMIN_ID:
+            user = get_user(self.spreadsheet, user_id)
+            if not user or user.get("status") != "approved":
+                await message.answer("У тебя нет доступа. Напиши /start чтобы запросить.")
+                return
+
         buttons = []
         for module in MODULES_DATA.get("modules", []):
             buttons.append([
@@ -110,6 +187,163 @@ class AcademyBot:
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("Выбери модуль для изучения:", reply_markup=keyboard)
+
+    async def cmd_pending(self, message: Message):
+        """Показывает заявки на рассмотрении (только для админа)."""
+        if message.from_user.id != ADMIN_ID:
+            await message.answer("Эта команда только для администратора.")
+            return
+
+        pending = get_pending_requests(self.spreadsheet)
+
+        if not pending:
+            await message.answer("Нет заявок на рассмотрении.")
+            return
+
+        for req in pending:
+            tid = req.get("telegram_id", "")
+            name = req.get("name", "Без имени")
+            username = req.get("username", "")
+            requested_at = req.get("requested_at", "")[:10]  # только дата
+
+            text = f"<b>Заявка на доступ</b>\n\n"
+            text += f"Имя: {name}\n"
+            if username:
+                text += f"Username: @{username}\n"
+            text += f"ID: {tid}\n"
+            text += f"Дата: {requested_at}"
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Менеджер", callback_data=f"approve:{tid}:manager"),
+                    InlineKeyboardButton(text="Руководитель", callback_data=f"approve:{tid}:team_lead")
+                ],
+                [
+                    InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{tid}")
+                ]
+            ])
+
+            await message.answer(text, reply_markup=keyboard)
+
+    async def on_request_access(self, callback: CallbackQuery):
+        """Обработчик запроса доступа."""
+        await callback.answer()
+
+        user = callback.from_user
+        name = user.full_name or user.first_name or "Без имени"
+        username = user.username
+
+        # Создаём заявку
+        created = create_access_request(
+            self.spreadsheet,
+            telegram_id=user.id,
+            name=name,
+            username=username
+        )
+
+        if created:
+            await callback.message.answer(
+                "Заявка отправлена!\n"
+                "Как только администратор одобрит — я напишу тебе."
+            )
+
+            # Уведомляем админа
+            text = f"<b>Новая заявка на доступ</b>\n\n"
+            text += f"Имя: {name}\n"
+            if username:
+                text += f"Username: @{username}\n"
+            text += f"ID: {user.id}"
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Менеджер", callback_data=f"approve:{user.id}:manager"),
+                    InlineKeyboardButton(text="Руководитель", callback_data=f"approve:{user.id}:team_lead")
+                ],
+                [
+                    InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{user.id}")
+                ]
+            ])
+
+            try:
+                await self.bot.send_message(ADMIN_ID, text, reply_markup=keyboard)
+            except Exception as e:
+                logger.error(f"Не удалось уведомить админа: {e}")
+        else:
+            await callback.message.answer(
+                "Заявка уже была отправлена ранее.\n"
+                "Ожидай решения администратора."
+            )
+
+    async def on_approve(self, callback: CallbackQuery):
+        """Обработчик одобрения заявки."""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Только админ может одобрять заявки", show_alert=True)
+            return
+
+        await callback.answer()
+
+        # approve:123456:manager
+        parts = callback.data.split(":")
+        user_tid = parts[1]
+        role = parts[2]
+
+        success = approve_user(
+            self.spreadsheet,
+            telegram_id=user_tid,
+            role=role,
+            approved_by=ADMIN_ID
+        )
+
+        if success:
+            role_text = "менеджер" if role == "manager" else "руководитель"
+
+            # Обновляем сообщение админу
+            await callback.message.edit_text(
+                callback.message.text + f"\n\n✅ Одобрено как {role_text}"
+            )
+
+            # Уведомляем пользователя
+            try:
+                await self.bot.send_message(
+                    int(user_tid),
+                    f"Твоя заявка одобрена!\n"
+                    f"Роль: {role_text}\n\n"
+                    f"Напиши /modules чтобы начать обучение."
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {user_tid}: {e}")
+        else:
+            await callback.message.answer("Ошибка при одобрении. Попробуй ещё раз.")
+
+    async def on_reject(self, callback: CallbackQuery):
+        """Обработчик отклонения заявки."""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Только админ может отклонять заявки", show_alert=True)
+            return
+
+        await callback.answer()
+
+        # reject:123456
+        user_tid = callback.data.split(":")[1]
+
+        success = reject_user(self.spreadsheet, telegram_id=user_tid)
+
+        if success:
+            # Обновляем сообщение админу
+            await callback.message.edit_text(
+                callback.message.text + "\n\n❌ Отклонено"
+            )
+
+            # Уведомляем пользователя
+            try:
+                await self.bot.send_message(
+                    int(user_tid),
+                    "К сожалению, твоя заявка была отклонена."
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить пользователя {user_tid}: {e}")
+        else:
+            await callback.message.answer("Ошибка при отклонении. Попробуй ещё раз.")
 
     async def on_module_start(self, callback: CallbackQuery):
         """Обработчик нажатия на кнопку модуля."""

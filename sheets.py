@@ -157,3 +157,148 @@ def dicts_to_table(dict_rows: Iterable[Dict[str, Any]], *, header: List[str]) ->
     return out
 
 
+# === Функции для работы с пользователями ===
+
+USERS_HEADER = ["telegram_id", "name", "username", "role", "status", "requested_at", "approved_at", "approved_by"]
+
+
+def get_user(ss: gspread.Spreadsheet, telegram_id: int | str) -> Dict[str, Any] | None:
+    """Получает пользователя по telegram_id."""
+    try:
+        ws = ss.worksheet("users")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return None
+
+        header = values[0]
+        tid_idx = header.index("telegram_id") if "telegram_id" in header else 0
+
+        for row in values[1:]:
+            if tid_idx < len(row) and str(row[tid_idx]) == str(telegram_id):
+                return {header[i]: row[i] for i in range(min(len(header), len(row)))}
+        return None
+    except gspread.WorksheetNotFound:
+        return None
+    except Exception as e:
+        print(f"Ошибка при получении пользователя: {e}")
+        return None
+
+
+def get_all_users(ss: gspread.Spreadsheet) -> List[Dict[str, Any]]:
+    """Получает всех пользователей."""
+    try:
+        ws = ss.worksheet("users")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return []
+
+        header = values[0]
+        users = []
+        for row in values[1:]:
+            if row and row[0]:  # есть telegram_id
+                users.append({header[i]: row[i] for i in range(min(len(header), len(row)))})
+        return users
+    except gspread.WorksheetNotFound:
+        return []
+    except Exception as e:
+        print(f"Ошибка при получении пользователей: {e}")
+        return []
+
+
+def create_access_request(
+    ss: gspread.Spreadsheet,
+    telegram_id: int | str,
+    name: str,
+    username: str | None = None
+) -> bool:
+    """Создаёт заявку на доступ."""
+    from datetime import datetime, timezone
+
+    try:
+        # Проверяем, нет ли уже заявки
+        existing = get_user(ss, telegram_id)
+        if existing:
+            return False
+
+        row = [
+            str(telegram_id),
+            name,
+            username or "",
+            "",  # role - пусто пока не одобрено
+            "pending",  # status
+            datetime.now(timezone.utc).isoformat(),  # requested_at
+            "",  # approved_at
+            ""   # approved_by
+        ]
+
+        append_to_worksheet(ss, "users", rows=[row], header=USERS_HEADER)
+        return True
+    except Exception as e:
+        print(f"Ошибка при создании заявки: {e}")
+        return False
+
+
+def approve_user(
+    ss: gspread.Spreadsheet,
+    telegram_id: int | str,
+    role: str,
+    approved_by: int | str
+) -> bool:
+    """Одобряет пользователя и назначает роль."""
+    from datetime import datetime, timezone
+
+    try:
+        ws = ss.worksheet("users")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return False
+
+        header = values[0]
+        tid_idx = header.index("telegram_id") if "telegram_id" in header else 0
+        role_idx = header.index("role") if "role" in header else 3
+        status_idx = header.index("status") if "status" in header else 4
+        approved_at_idx = header.index("approved_at") if "approved_at" in header else 6
+        approved_by_idx = header.index("approved_by") if "approved_by" in header else 7
+
+        for row_num, row in enumerate(values[1:], start=2):
+            if tid_idx < len(row) and str(row[tid_idx]) == str(telegram_id):
+                # Обновляем ячейки
+                ws.update_cell(row_num, role_idx + 1, role)
+                ws.update_cell(row_num, status_idx + 1, "approved")
+                ws.update_cell(row_num, approved_at_idx + 1, datetime.now(timezone.utc).isoformat())
+                ws.update_cell(row_num, approved_by_idx + 1, str(approved_by))
+                return True
+        return False
+    except Exception as e:
+        print(f"Ошибка при одобрении пользователя: {e}")
+        return False
+
+
+def reject_user(ss: gspread.Spreadsheet, telegram_id: int | str) -> bool:
+    """Отклоняет заявку пользователя."""
+    try:
+        ws = ss.worksheet("users")
+        values = ws.get_all_values()
+        if len(values) < 2:
+            return False
+
+        header = values[0]
+        tid_idx = header.index("telegram_id") if "telegram_id" in header else 0
+        status_idx = header.index("status") if "status" in header else 4
+
+        for row_num, row in enumerate(values[1:], start=2):
+            if tid_idx < len(row) and str(row[tid_idx]) == str(telegram_id):
+                ws.update_cell(row_num, status_idx + 1, "rejected")
+                return True
+        return False
+    except Exception as e:
+        print(f"Ошибка при отклонении пользователя: {e}")
+        return False
+
+
+def get_pending_requests(ss: gspread.Spreadsheet) -> List[Dict[str, Any]]:
+    """Получает список заявок на рассмотрении."""
+    users = get_all_users(ss)
+    return [u for u in users if u.get("status") == "pending"]
+
+
