@@ -1,1 +1,1 @@
-worker: python analyze_chats.py
+bot: python learning_bot.py
