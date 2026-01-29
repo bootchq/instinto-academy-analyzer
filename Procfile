@@ -1,1 +1,1 @@
-bot: python learning_bot.py
+bot: python academy_bot.py
