@@ -22,8 +22,11 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+# Лимит чатов за один запуск (Groq rate limit)
+MAX_CHATS_PER_RUN = 30
 
 import requests
 
@@ -136,13 +139,15 @@ class GroqClient:
             "temperature": 0.3,
         }
 
-        for attempt in range(3):
+        # Больше попыток с экспоненциальным backoff для rate limit
+        for attempt in range(5):
             try:
-                resp = self.session.post(self.BASE_URL, json=payload, timeout=60)
+                resp = self.session.post(self.BASE_URL, json=payload, timeout=90)
 
                 if resp.status_code == 429:
-                    wait = 60 if attempt == 0 else 120
-                    print(f"  Rate limit, жду {wait}с...")
+                    # Экспоненциальный backoff: 30, 60, 120, 240, 480 секунд
+                    wait = 30 * (2 ** attempt)
+                    print(f"  Rate limit, жду {wait}с (попытка {attempt + 1}/5)...")
                     time.sleep(wait)
                     continue
 
@@ -151,8 +156,8 @@ class GroqClient:
                 return data["choices"][0]["message"]["content"]
 
             except requests.exceptions.RequestException as e:
-                if attempt < 2:
-                    time.sleep(5 * (attempt + 1))
+                if attempt < 4:
+                    time.sleep(10 * (attempt + 1))
                     continue
                 raise RuntimeError(f"Groq API error: {e}")
 
@@ -330,14 +335,20 @@ def main():
                 c["chat_status"] = chat_status
                 chats_to_analyze.append(c)
 
+        total_to_analyze = len(chats_to_analyze)
         new_count = sum(1 for c in chats_to_analyze if c["reanalysis_reason"] == "новый")
-        updated_count = len(chats_to_analyze) - new_count
-        print(f"   Новых: {new_count}, обновлённых: {updated_count}")
+        updated_count = total_to_analyze - new_count
+        print(f"   Всего для анализа: {total_to_analyze} (новых: {new_count}, обновлённых: {updated_count})")
 
         if not chats_to_analyze:
             telegram.send("Академия INSTINTO: новых/изменённых чатов нет")
             print("Нет чатов для анализа!")
             return
+
+        # Ограничиваем количество за один запуск (Groq rate limit)
+        if len(chats_to_analyze) > MAX_CHATS_PER_RUN:
+            print(f"   Ограничиваю до {MAX_CHATS_PER_RUN} чатов (остальные в следующий раз)")
+            chats_to_analyze = chats_to_analyze[:MAX_CHATS_PER_RUN]
 
         # Анализируем
         results = []
@@ -389,12 +400,13 @@ def main():
                     "missed_opportunities": json.dumps(analysis.get("missed_opportunities", []), ensure_ascii=False),
                     "is_ethical": analysis.get("is_ethical", True),
                     "summary": analysis.get("summary", ""),
-                    "analyzed_at": datetime.utcnow().isoformat(),
+                    "analyzed_at": datetime.now(timezone.utc).isoformat(),
                 }
                 results.append(result)
 
                 print(f"  Сегмент: {result['customer_segment']}, оценка: {result['overall_score']}")
-                time.sleep(2)
+                # Пауза 10с между запросами (Groq rate limit)
+                time.sleep(10)
 
             except Exception as e:
                 print(f"  Ошибка: {e}")
@@ -419,13 +431,13 @@ def main():
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
             # Уведомление об успехе
+            remaining = total_to_analyze - len(chats_to_analyze)
             msg = (
                 f"<b>Академия INSTINTO</b>\n\n"
                 f"Анализ завершён:\n"
-                f"- Новых чатов: {new_count}\n"
-                f"- Обновлённых: {updated_count}\n"
                 f"- Проанализировано: {len(results)}\n"
-                f"- Ошибок: {errors}"
+                f"- Ошибок: {errors}\n"
+                f"- Осталось: {remaining} чатов"
             )
             telegram.send(msg)
             print("Готово!")
