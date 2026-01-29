@@ -6,6 +6,6 @@
   "deploy": {
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
-    "startCommand": "python academy_bot.py"
+    "startCommand": "bash entrypoint.sh"
   }
 }
