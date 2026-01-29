@@ -65,7 +65,12 @@ SKILL_NAMES = {
 
 # Маппинг skill_key -> module_id
 SKILL_TO_MODULE = {
+    "greeting_score": "greeting",
     "needs_score": "needs_discovery",
+    "presentation_score": "presentation",
+    "objection_score": "objection_handling",
+    "closing_score": "closing",
+    "cross_sell_score": "cross_sell",
 }
 
 
