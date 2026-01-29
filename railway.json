@@ -6,6 +6,6 @@
   "deploy": {
     "numReplicas": 1,
     "restartPolicyType": "ON_FAILURE",
-    "cronSchedule": "0 0 * * *"
+    "cronSchedule": "0 * * * *"
   }
 }

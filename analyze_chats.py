@@ -25,8 +25,8 @@ import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-# Лимит чатов за один запуск (Groq rate limit)
-MAX_CHATS_PER_RUN = 50
+# Лимит чатов за один запуск (при 60с паузе = 10 минут)
+MAX_CHATS_PER_RUN = 10
 
 import requests
 
@@ -405,8 +405,8 @@ def main():
                 results.append(result)
 
                 print(f"  Сегмент: {result['customer_segment']}, оценка: {result['overall_score']}")
-                # Пауза 10с между запросами (Groq rate limit)
-                time.sleep(10)
+                # Пауза 60с между запросами (Groq rate limit на бесплатном плане)
+                time.sleep(60)
 
             except Exception as e:
                 print(f"  Ошибка: {e}")
