@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 
 # Супер-админ (может одобрять заявки)
 ADMIN_ID = 57186925
+
+# WebApp URL для профиля навыков
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
 # Загружаем модули
 MODULES_PATH = Path(__file__).parent / "modules" / "learning_modules.json"
@@ -85,6 +88,7 @@ class AcademyBot:
         self.dp.message.register(self.cmd_start, Command("start"))
         self.dp.message.register(self.cmd_modules, Command("modules"))
         self.dp.message.register(self.cmd_pending, Command("pending"))
+        self.dp.message.register(self.cmd_profile, Command("profile"))
 
         # Callbacks: система доступа
         self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
@@ -111,11 +115,18 @@ class AcademyBot:
 
         # Админ всегда имеет доступ
         if user_id == ADMIN_ID:
+            keyboard = None
+            if WEBAPP_URL:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Профиль навыков", web_app=WebAppInfo(url=WEBAPP_URL))
+                ]])
             await message.answer(
                 "Привет, админ! Ты управляешь Академией INSTINTO.\n\n"
                 "Команды:\n"
                 "/modules — список модулей обучения\n"
-                "/pending — заявки на рассмотрении"
+                "/pending — заявки на рассмотрении\n"
+                "/profile — профиль навыков",
+                reply_markup=keyboard
             )
             return
 
@@ -155,10 +166,18 @@ class AcademyBot:
                 "admin": "администратор"
             }.get(role, role)
 
+            keyboard = None
+            if WEBAPP_URL:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Мой профиль навыков", web_app=WebAppInfo(url=WEBAPP_URL))
+                ]])
+
             await message.answer(
                 f"С возвращением! Твоя роль: {role_text}\n\n"
                 "Команды:\n"
-                "/modules — список модулей обучения"
+                "/modules — список модулей обучения\n"
+                "/profile — профиль навыков",
+                reply_markup=keyboard
             )
             return
 
@@ -187,6 +206,17 @@ class AcademyBot:
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer("Выбери модуль для изучения:", reply_markup=keyboard)
+
+    async def cmd_profile(self, message: Message):
+        """Открывает профиль навыков."""
+        if not WEBAPP_URL:
+            await message.answer("WebApp профиля пока не настроен.")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть профиль", web_app=WebAppInfo(url=WEBAPP_URL))
+        ]])
+        await message.answer("Нажми кнопку для просмотра профиля навыков:", reply_markup=keyboard)
 
     async def cmd_pending(self, message: Message):
         """Показывает заявки на рассмотрении (только для админа)."""
