@@ -20,12 +20,15 @@ import os
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import requests
 
-from sheets import open_spreadsheet
+from sheets import open_spreadsheet, get_all_users
 
+
+# ID админа для сводного отчёта
+ADMIN_CHAT_ID = "57186925"
 
 # Названия навыков для отчёта
 SKILL_NAMES = {
@@ -41,19 +44,18 @@ SKILL_NAMES = {
 class TelegramNotifier:
     """Отправляет уведомления в Telegram."""
 
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(self, bot_token: str):
         self.bot_token = bot_token
-        self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
 
-    def send(self, message: str, parse_mode: str = "HTML", reply_markup: dict = None) -> bool:
-        """Отправить сообщение."""
-        if not self.bot_token or not self.chat_id:
-            print("Telegram не настроен (нет токена или chat_id)")
+    def send(self, chat_id: str, message: str, parse_mode: str = "HTML", reply_markup: dict = None) -> bool:
+        """Отправить сообщение конкретному пользователю."""
+        if not self.bot_token or not chat_id:
+            print(f"Telegram не настроен (нет токена или chat_id={chat_id})")
             return False
         try:
             payload = {
-                "chat_id": self.chat_id,
+                "chat_id": chat_id,
                 "text": message,
                 "parse_mode": parse_mode
             }
@@ -66,13 +68,13 @@ class TelegramNotifier:
                 timeout=10
             )
             if resp.status_code != 200:
-                print(f"Telegram API error: {resp.text}")
+                print(f"Telegram API error для {chat_id}: {resp.text}")
             return resp.status_code == 200
         except Exception as e:
-            print(f"Ошибка отправки в Telegram: {e}")
+            print(f"Ошибка отправки в Telegram ({chat_id}): {e}")
             return False
 
-    def send_with_module_buttons(self, message: str, skill_keys: List[str]) -> bool:
+    def send_with_module_buttons(self, chat_id: str, message: str, skill_keys: List[str]) -> bool:
         """Отправить сообщение с inline-кнопками модулей."""
         # Маппинг skill_key -> module_id
         skill_to_module = {
@@ -90,15 +92,15 @@ class TelegramNotifier:
             if module_id:
                 skill_name = SKILL_NAMES.get(skill_key, skill_key)
                 buttons.append([{
-                    "text": f"📚 Пройти: {skill_name}",
+                    "text": f"Пройти: {skill_name}",
                     "callback_data": f"module:{module_id}"
                 }])
 
         if not buttons:
-            return self.send(message)
+            return self.send(chat_id, message)
 
         reply_markup = {"inline_keyboard": buttons}
-        return self.send(message, reply_markup=reply_markup)
+        return self.send(chat_id, message, reply_markup=reply_markup)
 
 
 def load_analysis_data(ss, days: int = 7) -> List[Dict[str, Any]]:
@@ -240,11 +242,32 @@ def format_report(
     return "\n".join(lines)
 
 
+def build_user_mapping(ss) -> Dict[str, str]:
+    """
+    Создаёт маппинг manager_name -> telegram_id из таблицы users.
+    Возвращает только approved пользователей с ролью manager.
+    """
+    users = get_all_users(ss)
+    mapping = {}
+
+    for user in users:
+        if user.get("status") == "approved" and user.get("role") == "manager":
+            name = user.get("name", "").strip()
+            tid = user.get("telegram_id", "").strip()
+            if name and tid:
+                mapping[name] = tid
+                # Также добавляем по username если есть
+                username = user.get("username", "").strip()
+                if username:
+                    mapping[username] = tid
+
+    return mapping
+
+
 def main():
     """Основная функция."""
     telegram = TelegramNotifier(
-        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-        chat_id=os.environ.get("TELEGRAM_CHAT_ID", "")
+        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "")
     )
 
     try:
@@ -257,28 +280,34 @@ def main():
         print("Подключаюсь к Google Sheets...")
         ss = open_spreadsheet(spreadsheet_id=sheets_id, service_account_json_path=sa_json)
 
+        # Загружаем маппинг пользователей
+        print("Загружаю маппинг пользователей...")
+        user_mapping = build_user_mapping(ss)
+        print(f"   Найдено менеджеров с telegram_id: {len(user_mapping)}")
+
         print("Загружаю данные анализа за 7 дней...")
         data = load_analysis_data(ss, days=7)
         print(f"   Найдено записей: {len(data)}")
 
         if not data:
-            telegram.send("Еженедельный отчёт: нет данных за последние 7 дней")
+            telegram.send(ADMIN_CHAT_ID, "Еженедельный отчёт: нет данных за последние 7 дней")
             print("Нет данных для отчёта")
             return
 
         print("Агрегирую по менеджерам...")
         managers = aggregate_by_manager(data)
-        print(f"   Менеджеров: {len(managers)}")
+        print(f"   Менеджеров в данных: {len(managers)}")
 
         if not managers:
-            telegram.send("Еженедельный отчёт: нет данных по менеджерам")
+            telegram.send(ADMIN_CHAT_ID, "Еженедельный отчёт: нет данных по менеджерам")
             return
 
-        # Для теста — отправляем сводный отчёт по всем менеджерам
-        # В продакшене здесь будет цикл по менеджерам с их telegram_chat_id
         reports_sent = 0
+        admin_summary = ["<b>Сводка еженедельных отчётов</b>\n"]
 
         for manager_id, m in managers.items():
+            manager_name = m["manager_name"]
+
             # Считаем средние
             averages = calculate_skill_averages(m["skills"])
 
@@ -286,7 +315,7 @@ def main():
             weakest = find_weakest_skills(averages, top_n=3)
 
             if not weakest:
-                print(f"   {m['manager_name']}: недостаточно данных для отчёта")
+                print(f"   {manager_name}: недостаточно данных для отчёта")
                 continue
 
             # Берём примеры упущенных возможностей
@@ -294,29 +323,41 @@ def main():
 
             # Формируем отчёт
             report = format_report(
-                manager_name=m["manager_name"],
+                manager_name=manager_name,
                 chat_count=m["chat_count"],
                 weakest=weakest,
                 missed_examples=missed_examples,
             )
 
-            print(f"\n--- Отчёт для {m['manager_name']} ---")
-            print(report)
-            print("---\n")
-
             # Собираем skill_keys из слабых мест для кнопок модулей
             skill_keys = [skill_key for skill_key, _ in weakest]
 
-            # Отправляем в Telegram с inline-кнопками модулей
-            full_report = f"Менеджер: {m['manager_name']}\n\n" + report
-            if telegram.send_with_module_buttons(full_report, skill_keys):
-                reports_sent += 1
+            # Ищем telegram_id менеджера
+            manager_tid = user_mapping.get(manager_name)
 
-        print(f"Отправлено отчётов: {reports_sent}")
+            if manager_tid:
+                # Отправляем персональный отчёт менеджеру
+                if telegram.send_with_module_buttons(manager_tid, report, skill_keys):
+                    reports_sent += 1
+                    admin_summary.append(f"✅ {manager_name}: отправлен")
+                    print(f"   {manager_name}: отчёт отправлен на {manager_tid}")
+                else:
+                    admin_summary.append(f"❌ {manager_name}: ошибка отправки")
+                    print(f"   {manager_name}: ОШИБКА отправки")
+            else:
+                # Менеджер не зарегистрирован в боте
+                admin_summary.append(f"⚠️ {manager_name}: не зарегистрирован в боте")
+                print(f"   {manager_name}: не найден в users (нужна регистрация)")
+
+        # Отправляем сводку админу
+        admin_summary.append(f"\nВсего отправлено: {reports_sent}")
+        telegram.send(ADMIN_CHAT_ID, "\n".join(admin_summary))
+
+        print(f"\nОтправлено персональных отчётов: {reports_sent}")
 
     except Exception as e:
         error_msg = f"<b>Ошибка еженедельного отчёта</b>\n\n<pre>{traceback.format_exc()[-500:]}</pre>"
-        telegram.send(error_msg)
+        telegram.send(ADMIN_CHAT_ID, error_msg)
         print(f"Критическая ошибка: {e}")
         raise
 
