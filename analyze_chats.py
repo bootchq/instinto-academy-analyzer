@@ -221,6 +221,7 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         chats_ws = ss.worksheet("chats_raw")
         chats_data = chats_ws.get_all_records(expected_headers=chats_header)
+        print(f"   📊 Прочитано чатов из chats_raw: {len(chats_data)}")
     except Exception as e:
         print(f"Ошибка чтения chats_raw: {e}")
         return []
@@ -228,6 +229,7 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
     try:
         messages_ws = ss.worksheet("messages_raw")
         messages_data = messages_ws.get_all_records(expected_headers=messages_header)
+        print(f"   📊 Прочитано сообщений из messages_raw: {len(messages_data)}")
     except Exception as e:
         print(f"Ошибка чтения messages_raw: {e}")
         return []
@@ -238,14 +240,21 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
         if chat_id:
             messages_by_chat.setdefault(chat_id, []).append(msg)
 
+    print(f"   📊 Чатов с сообщениями: {len(messages_by_chat)}")
+
     result = []
+    skipped_no_id = 0
+    skipped_few_msgs = 0
+
     for chat in chats_data[:limit]:
         chat_id = str(chat.get("chat_id", ""))
         if not chat_id:
+            skipped_no_id += 1
             continue
 
         messages = messages_by_chat.get(chat_id, [])
         if len(messages) < 2:
+            skipped_few_msgs += 1
             continue
 
         messages.sort(key=lambda m: m.get("sent_at", ""))
@@ -255,6 +264,10 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
             "chat": chat,
             "messages": messages
         })
+
+    print(f"   📊 Пропущено без chat_id: {skipped_no_id}")
+    print(f"   📊 Пропущено с < 2 сообщений: {skipped_few_msgs}")
+    print(f"   📊 Итого для анализа: {len(result)}")
 
     return result
 
