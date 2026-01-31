@@ -210,16 +210,24 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
 def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
     """Загружает чаты и сообщения из Google Sheets."""
 
+    # Заголовки для expected_headers (фикс для дубликатов)
+    chats_header = [
+        "chat_id", "channel", "manager_id", "manager_name", "client_id", "order_id",
+        "has_order", "payment_status", "payment_status_ru", "is_successful",
+        "order_count", "status", "created_at", "outcome"
+    ]
+    messages_header = ["chat_id", "message_id", "sent_at", "direction", "manager_id", "text"]
+
     try:
         chats_ws = ss.worksheet("chats_raw")
-        chats_data = chats_ws.get_all_records()
+        chats_data = chats_ws.get_all_records(expected_headers=chats_header)
     except Exception as e:
         print(f"Ошибка чтения chats_raw: {e}")
         return []
 
     try:
         messages_ws = ss.worksheet("messages_raw")
-        messages_data = messages_ws.get_all_records()
+        messages_data = messages_ws.get_all_records(expected_headers=messages_header)
     except Exception as e:
         print(f"Ошибка чтения messages_raw: {e}")
         return []
