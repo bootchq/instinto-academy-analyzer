@@ -32,7 +32,7 @@ from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-from sheets import (
+from shared.sheets_academy import (
     open_spreadsheet,
     append_to_worksheet,
     get_user,

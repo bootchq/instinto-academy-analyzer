@@ -30,7 +30,7 @@ MAX_CHATS_PER_RUN = 10
 
 import requests
 
-from sheets import open_spreadsheet, upsert_worksheet, append_to_worksheet, dicts_to_table
+from shared.sheets_academy import open_spreadsheet, upsert_worksheet, append_to_worksheet, dicts_to_table
 
 
 # Промпт для анализа чата
