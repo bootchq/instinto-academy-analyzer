@@ -103,7 +103,9 @@ def aggregate_by_manager(data: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]
             score = row.get(skill_key, 0)
             if score:
                 try:
-                    m["skills"][skill_key].append(float(score))
+                    # Обрабатываем оба формата: "5.2" и "5,2"
+                    score_str = str(score).replace(',', '.')
+                    m["skills"][skill_key].append(float(score_str))
                 except (ValueError, TypeError):
                     pass
 
