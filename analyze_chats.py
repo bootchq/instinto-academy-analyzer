@@ -226,12 +226,36 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
         print(f"Ошибка чтения chats_raw: {e}")
         return []
 
+    # Читаем сообщения из всех листов messages_* (разбитых по месяцам)
+    messages_data = []
     try:
-        messages_ws = ss.worksheet("messages_raw")
-        messages_data = messages_ws.get_all_records(expected_headers=messages_header)
-        print(f"   📊 Прочитано сообщений из messages_raw: {len(messages_data)}")
+        all_sheets = ss.worksheets()
+        message_sheets = [s for s in all_sheets if s.title.startswith('messages_')]
+
+        if not message_sheets:
+            # Fallback на старый формат messages_raw если нет новых листов
+            try:
+                messages_ws = ss.worksheet("messages_raw")
+                message_sheets = [messages_ws]
+                print(f"   ⚠️ Используем старый формат messages_raw")
+            except Exception:
+                print(f"   ⚠️ Не найдены листы messages_* и messages_raw")
+                return []
+
+        print(f"   📊 Найдено листов с сообщениями: {len(message_sheets)}")
+
+        for sheet in message_sheets:
+            try:
+                sheet_data = sheet.get_all_records(expected_headers=messages_header)
+                messages_data.extend(sheet_data)
+                print(f"   📝 {sheet.title}: {len(sheet_data)} сообщений")
+            except Exception as e:
+                print(f"   ⚠️ Ошибка чтения {sheet.title}: {e}")
+                continue
+
+        print(f"   📊 Всего прочитано сообщений: {len(messages_data)}")
     except Exception as e:
-        print(f"Ошибка чтения messages_raw: {e}")
+        print(f"Ошибка чтения сообщений: {e}")
         return []
 
     messages_by_chat: Dict[str, List[Dict]] = {}
