@@ -180,10 +180,46 @@ def format_dialog(messages: List[Dict[str, Any]]) -> str:
         if not text:
             continue
 
-        role = "Клиент" if direction == "in" else "Менеджер"
-        lines.append(f"{role}: {text}")
+        # Поддержка маркера пропуска
+        if direction == "system":
+            lines.append(f"\n{text}\n")
+        elif direction == "in":
+            lines.append(f"Клиент: {text}")
+        else:
+            lines.append(f"Менеджер: {text}")
 
     return "\n".join(lines)
+
+
+def smart_truncate_messages(messages: List[Dict[str, Any]], max_messages: int = 50) -> List[Dict[str, Any]]:
+    """
+    Умная обрезка сообщений: сохраняет начало и конец диалога.
+
+    Args:
+        messages: Список сообщений
+        max_messages: Максимальное количество сообщений (по умолчанию 50)
+
+    Returns:
+        Обрезанный список сообщений с маркером пропуска
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    # Берём первые 5 и последние 45
+    first_n = 5
+    last_n = max_messages - first_n
+
+    head = messages[:first_n]
+    tail = messages[-last_n:]
+    skipped_count = len(messages) - first_n - last_n
+
+    # Вставляем маркер пропуска
+    skip_marker = {
+        "direction": "system",
+        "text": f"[...пропущено {skipped_count} сообщений...]"
+    }
+
+    return head + [skip_marker] + tail
 
 
 def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
@@ -413,13 +449,18 @@ def main():
 
             print(f"\n[{i}/{len(chats_to_analyze)}] Анализирую чат {chat_id} ({reason})...")
 
-            dialog_text = format_dialog(messages)
-            if len(dialog_text) < 50:
-                print(f"  Пропускаю — слишком короткий диалог")
+            # Умная обрезка до 50 сообщений
+            if len(messages) < 5:
+                print(f"  Пропускаю — слишком мало сообщений ({len(messages)})")
                 continue
 
-            if len(dialog_text) > 8000:
-                dialog_text = dialog_text[:8000] + "\n[...диалог обрезан...]"
+            truncated_messages = smart_truncate_messages(messages, max_messages=50)
+            dialog_text = format_dialog(truncated_messages)
+
+            # Дополнительная защита от превышения токенов
+            if len(dialog_text) > 12000:  # ~3000 токенов
+                print(f"  ⚠️ Диалог длинный ({len(dialog_text)} символов), обрезаю до 12000")
+                dialog_text = dialog_text[:12000] + "\n[...диалог обрезан по лимиту символов...]"
 
             prompt = ANALYSIS_PROMPT.format(dialog=dialog_text)
 
