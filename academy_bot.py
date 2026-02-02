@@ -112,6 +112,11 @@ class AcademyBot:
     async def cmd_start(self, message: Message):
         """Обработчик /start."""
         user_id = message.from_user.id
+        username = message.from_user.username
+        name = message.from_user.full_name
+
+        # ЛОГИРОВАНИЕ для получения Telegram ID новых пользователей (Бика, Ниса)
+        logger.info(f"👤 /start от: {name} (@{username}) | ID: {user_id}")
 
         # Админ всегда имеет доступ
         if user_id == ADMIN_ID:
