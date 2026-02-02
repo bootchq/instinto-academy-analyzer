@@ -484,26 +484,34 @@ def main():
             rows = dicts_to_table(results, header=header)
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
-            # Уведомление об успехе
-            remaining = total_to_analyze - len(chats_to_analyze)
-            msg = (
-                f"<b>Академия INSTINTO</b>\n\n"
-                f"Анализ завершён:\n"
-                f"- Проанализировано: {len(results)}\n"
-                f"- Ошибок: {errors}\n"
-                f"- Осталось: {remaining} чатов"
+            # Уведомление об успехе через централизованную систему алертов
+            from shared.alerting import alert_success
+
+            unique_managers = len(set(r["manager_id"] for r in results if r["manager_id"]))
+
+            alert_success(
+                service_name="analiz_chatov-posredstvom_ai",
+                message="Анализ чатов завершён",
+                stats={
+                    "Проанализировано чатов": len(results),
+                    "Обработано менеджеров": unique_managers,
+                    "Ошибок": errors
+                }
             )
-            telegram.send(msg)
             print("Готово!")
         else:
             telegram.send("Академия INSTINTO: анализ завершён, но результатов нет (ошибки парсинга)")
             print("Нет результатов для записи")
 
     except Exception as e:
-        # Уведомление об ошибке
-        error_msg = f"<b>Академия INSTINTO</b>\n\nОшибка анализа:\n<pre>{traceback.format_exc()[-500:]}</pre>"
-        telegram.send(error_msg)
-        print(f"Критическая ошибка: {e}")
+        # Уведомление об ошибке через централизованную систему алертов
+        from shared.alerting import alert_error
+
+        alert_error(
+            service_name="analiz_chatov-posredstvom_ai",
+            error=e,
+            context="Критическая ошибка анализа чатов"
+        )
         raise
 
 

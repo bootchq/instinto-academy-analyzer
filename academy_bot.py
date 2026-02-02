@@ -516,6 +516,14 @@ class AcademyBot:
         # Удаляем webhook если был и сбрасываем старые апдейты
         await self.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Бот запущен")
+
+        # Уведомление об успешном запуске через централизованную систему алертов
+        from shared.alerting import alert_success
+        alert_success(
+            service_name="bot-obrabotchik-komand",
+            message="Бот запущен и работает"
+        )
+
         await self.dp.start_polling(self.bot, allowed_updates=["message", "callback_query"])
 
 

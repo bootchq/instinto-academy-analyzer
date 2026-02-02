@@ -133,10 +133,25 @@ def main():
 
         print(f"\nОтправлено модулей обучения: {modules_sent}")
 
+        # Уведомление об успехе через централизованную систему алертов
+        from shared.alerting import alert_success
+        alert_success(
+            service_name="send-weeks-obuchenie",
+            message="Модули обучения отправлены",
+            stats={
+                "Отправлено модулей": modules_sent,
+                "Всего менеджеров": len(managers)
+            }
+        )
+
     except Exception as e:
-        error_msg = f"<b>Ошибка еженедельного обучения</b>\n\n<pre>{traceback.format_exc()[-500:]}</pre>"
-        telegram.send(ADMIN_CHAT_ID, error_msg)
-        print(f"Критическая ошибка: {e}")
+        # Уведомление об ошибке через централизованную систему алертов
+        from shared.alerting import alert_error
+        alert_error(
+            service_name="send-weeks-obuchenie",
+            error=e,
+            context="Ошибка отправки модулей обучения"
+        )
         raise
 
 
