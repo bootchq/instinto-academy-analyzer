@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -108,6 +108,9 @@ class AcademyBot:
         # Callbacks: обучение
         self.dp.callback_query.register(self.on_module_start, F.data.startswith("module:"))
         self.dp.callback_query.register(self.on_quiz_answer, F.data.startswith("quiz:"))
+
+        # Контакт для авторизации
+        self.dp.message.register(self.on_contact_received, F.contact)
 
     @property
     def spreadsheet(self):
@@ -280,62 +283,28 @@ class AcademyBot:
             await message.answer(text, reply_markup=keyboard)
 
     async def on_request_access(self, callback: CallbackQuery):
-        """Обработчик запроса доступа."""
+        """Обработчик запроса доступа — запрашиваем контакт."""
         await callback.answer()
 
-        user = callback.from_user
-        name = user.full_name or user.first_name or "Без имени"
-        username = user.username
-
-        # Создаём заявку
-        created = create_access_request(
-            self.spreadsheet,
-            telegram_id=user.id,
-            name=name,
-            username=username
+        # Запрашиваем контакт для получения телефона
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Отправить контакт", request_contact=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True
         )
 
-        if created:
-            await callback.message.answer(
-                "Заявка отправлена!\n"
-                "Как только администратор одобрит — я напишу тебе."
-            )
-
-            # Уведомляем админа
-            text = f"<b>Новая заявка на доступ</b>\n\n"
-            text += f"Имя: {name}\n"
-            if username:
-                text += f"Username: @{username}\n"
-            text += f"ID: {user.id}"
-
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Менеджер", callback_data=f"approve:{user.id}:manager"),
-                    InlineKeyboardButton(text="Руководитель", callback_data=f"approve:{user.id}:team_lead")
-                ],
-                [
-                    InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{user.id}")
-                ]
-            ])
-
-            try:
-                await self.bot.send_message(ADMIN_ID, text, reply_markup=keyboard)
-            except Exception as e:
-                logger.error(f"Не удалось уведомить админа: {e}")
-        else:
-            await callback.message.answer(
-                "Заявка уже была отправлена ранее.\n"
-                "Ожидай решения администратора."
-            )
+        await callback.message.answer(
+            "Для подачи заявки поделитесь своим контактом.\n"
+            "Это нужно для верификации.",
+            reply_markup=keyboard
+        )
 
     async def _handle_web_access_request(self, message: Message):
-        """Обработчик запроса доступа с сайта через deep-link."""
-        from web_auth import get_db, send_telegram_notification, ADMIN_ID as WEB_ADMIN_ID
+        """Обработчик запроса доступа с сайта через deep-link — запрашиваем контакт."""
+        from web_auth import get_db
 
         user = message.from_user
-        user_id = user.id
-        username = user.username or str(user_id)
-        name = user.full_name or user.first_name or "Без имени"
+        username = user.username or str(user.id)
 
         try:
             conn = get_db()
@@ -352,7 +321,96 @@ class AcademyBot:
                 await message.answer(
                     "У вас уже есть доступ к Академии!\n\n"
                     f"Ваш логин: <code>{existing_user['login']}</code>\n\n"
-                    "Сайт: https://academy-modules.vercel.app"
+                    "Сайт: https://academy-modules.vercel.app",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                cur.close()
+                conn.close()
+                return
+
+            # Проверяем, есть ли уже заявка
+            cur.execute(
+                "SELECT id, status FROM web_access_requests WHERE telegram_username = %s ORDER BY created_at DESC LIMIT 1",
+                (username,)
+            )
+            existing_request = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            if existing_request and existing_request["status"] == "pending":
+                await message.answer(
+                    "Ваша заявка уже отправлена и ожидает рассмотрения.\n"
+                    "Как только администратор одобрит — я пришлю вам логин и пароль.",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                return
+
+            # Запрашиваем контакт
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Отправить контакт", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+
+            await message.answer(
+                "Для получения доступа к Академии поделитесь своим контактом.\n"
+                "Это нужно для верификации.",
+                reply_markup=keyboard
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки заявки: {e}")
+            # Всё равно запрашиваем контакт
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Отправить контакт", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+            await message.answer(
+                "Для получения доступа к Академии поделитесь своим контактом.",
+                reply_markup=keyboard
+            )
+
+    async def on_contact_received(self, message: Message):
+        """Обработчик получения контакта — создаём заявку."""
+        from web_auth import get_db
+
+        contact = message.contact
+        user = message.from_user
+
+        # Проверяем что это свой контакт
+        if contact.user_id != user.id:
+            await message.answer(
+                "Пожалуйста, отправьте свой контакт, а не чужой.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return
+
+        user_id = user.id
+        username = user.username or str(user_id)
+        name = user.full_name or user.first_name or contact.first_name or "Без имени"
+        phone = contact.phone_number
+
+        # Сохраняем telegram_id
+        save_telegram_user(user_id, username, name)
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Проверяем, есть ли уже пользователь с доступом
+            cur.execute(
+                "SELECT id, login FROM web_users WHERE telegram_username = %s",
+                (username,)
+            )
+            existing_user = cur.fetchone()
+
+            if existing_user:
+                await message.answer(
+                    "У вас уже есть доступ к Академии!\n\n"
+                    f"Ваш логин: <code>{existing_user['login']}</code>\n\n"
+                    "Сайт: https://academy-modules.vercel.app",
+                    reply_markup=ReplyKeyboardRemove()
                 )
                 cur.close()
                 conn.close()
@@ -365,34 +423,36 @@ class AcademyBot:
             )
             existing_request = cur.fetchone()
 
-            if existing_request:
-                if existing_request["status"] == "pending":
-                    await message.answer(
-                        "Ваша заявка уже отправлена и ожидает рассмотрения.\n"
-                        "Как только администратор одобрит — я пришлю вам логин и пароль."
-                    )
-                    cur.close()
-                    conn.close()
-                    return
+            if existing_request and existing_request["status"] == "pending":
+                await message.answer(
+                    "Ваша заявка уже отправлена и ожидает рассмотрения.\n"
+                    "Как только администратор одобрит — я пришлю вам логин и пароль.",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                cur.close()
+                conn.close()
+                return
 
-            # Создаём заявку
+            # Создаём заявку с телефоном
             cur.execute(
-                "INSERT INTO web_access_requests (telegram_username, status) VALUES (%s, 'pending') RETURNING id",
-                (username,)
+                "INSERT INTO web_access_requests (telegram_username, phone, status) VALUES (%s, %s, 'pending') RETURNING id",
+                (username, phone)
             )
             request_id = cur.fetchone()["id"]
             conn.commit()
 
             await message.answer(
                 "Заявка на доступ отправлена!\n\n"
-                "Как только администратор одобрит — я пришлю вам логин и пароль для входа на сайт Академии."
+                "Как только администратор одобрит — я пришлю вам логин и пароль для входа на сайт Академии.",
+                reply_markup=ReplyKeyboardRemove()
             )
 
             # Уведомляем админа
             text = (
-                f"<b>Новая заявка на доступ к Академии (с сайта)</b>\n\n"
+                f"<b>Новая заявка на доступ к Академии</b>\n\n"
                 f"Имя: {name}\n"
                 f"Username: @{username}\n"
+                f"Телефон: {phone}\n"
                 f"Telegram ID: {user_id}\n"
                 f"ID заявки: {request_id}"
             )
@@ -410,8 +470,11 @@ class AcademyBot:
             conn.close()
 
         except Exception as e:
-            logger.error(f"Ошибка создания заявки с сайта: {e}")
-            await message.answer("Произошла ошибка. Попробуйте позже.")
+            logger.error(f"Ошибка создания заявки: {e}")
+            await message.answer(
+                "Произошла ошибка. Попробуйте позже.",
+                reply_markup=ReplyKeyboardRemove()
+            )
 
     async def on_approve(self, callback: CallbackQuery):
         """Обработчик одобрения заявки."""

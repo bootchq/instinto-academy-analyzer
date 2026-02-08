@@ -48,6 +48,21 @@ def get_db():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
+def run_migrations():
+    """Выполняет миграции базы данных."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        # Добавляем колонку phone если её нет
+        cur.execute("ALTER TABLE web_access_requests ADD COLUMN IF NOT EXISTS phone VARCHAR(50)")
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Миграции выполнены")
+    except Exception as e:
+        logger.warning(f"Миграции пропущены: {e}")
+
+
 def hash_password(password: str) -> str:
     """Хеширует пароль."""
     return hashlib.sha256(password.encode()).hexdigest()
@@ -405,6 +420,7 @@ def reject_web_request(request_id: int) -> str:
 
 def run_api_server(host="0.0.0.0", port=5000):
     """Запускает Flask сервер."""
+    run_migrations()
     logger.info(f"Запуск API сервера на {host}:{port}")
     app.run(host=host, port=port, threaded=True)
 
