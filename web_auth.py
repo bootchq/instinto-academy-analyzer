@@ -145,6 +145,35 @@ def health():
     return jsonify({"status": "ok", "service": "academy-auth"})
 
 
+@app.route("/api/clear-auth", methods=["POST"])
+def clear_auth():
+    """Очищает все данные авторизации (только для тестирования)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("DELETE FROM web_users")
+        users = cur.rowcount
+
+        cur.execute("DELETE FROM web_access_requests")
+        requests = cur.rowcount
+
+        cur.execute("DELETE FROM telegram_users")
+        tg = cur.rowcount
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "success": True,
+            "deleted": {"web_users": users, "web_access_requests": requests, "telegram_users": tg}
+        })
+    except Exception as e:
+        logger.error(f"Ошибка очистки: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/request-access", methods=["POST"])
 def request_access():
     """Подать заявку на доступ."""
