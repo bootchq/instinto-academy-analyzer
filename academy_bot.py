@@ -37,12 +37,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from shared.sheets_academy import (
     open_spreadsheet,
-    append_to_worksheet,
-    get_user,
-    create_access_request,
-    approve_user,
-    reject_user,
-    get_pending_requests
+    append_to_worksheet
 )
 
 # Веб-авторизация
@@ -96,10 +91,10 @@ class AcademyBot:
         self.dp.message.register(self.cmd_pending, Command("pending"))
         self.dp.message.register(self.cmd_profile, Command("profile"))
 
-        # Callbacks: система доступа (Telegram)
-        self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
-        self.dp.callback_query.register(self.on_approve, F.data.startswith("approve:"))
-        self.dp.callback_query.register(self.on_reject, F.data.startswith("reject:"))
+        # Callbacks: старая система (не используется, оставлено для совместимости)
+        # self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
+        # self.dp.callback_query.register(self.on_approve, F.data.startswith("approve:"))
+        # self.dp.callback_query.register(self.on_reject, F.data.startswith("reject:"))
 
         # Callbacks: веб-авторизация
         self.dp.callback_query.register(self.on_web_approve, F.data.startswith("web_approve:"))
@@ -157,56 +152,75 @@ class AcademyBot:
             )
             return
 
-        # Проверяем пользователя в базе
-        user = get_user(self.spreadsheet, user_id)
+        # Проверяем пользователя в PostgreSQL
+        from web_auth import get_db
 
-        if user is None:
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Проверяем, есть ли пользователь с доступом
+            cur.execute(
+                "SELECT login, role FROM web_users WHERE telegram_username = %s",
+                (username,)
+            )
+            web_user = cur.fetchone()
+
+            if web_user:
+                # Пользователь уже авторизован
+                cur.close()
+                conn.close()
+
+                await message.answer(
+                    f"С возвращением!\n\n"
+                    f"Ваш логин: <code>{web_user['login']}</code>\n"
+                    f"Сайт: https://academy-modules.vercel.app",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                return
+
+            # Проверяем, есть ли заявка
+            cur.execute(
+                "SELECT status FROM web_access_requests WHERE telegram_username = %s ORDER BY created_at DESC LIMIT 1",
+                (username,)
+            )
+            request = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            if request and request["status"] == "pending":
+                await message.answer(
+                    "Твоя заявка на рассмотрении.\n"
+                    "Как только администратор одобрит — я пришлю логин и пароль.",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                return
+
             # Новый пользователь — предлагаем запросить доступ
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Запросить доступ", callback_data="request_access")
-            ]])
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Запросить доступ", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
             await message.answer(
                 "Привет! Я бот Академии INSTINTO.\n\n"
-                "Для доступа к обучению нужно одобрение администратора.",
+                "Для доступа нажмите кнопку и поделитесь контактом.",
                 reply_markup=keyboard
             )
-            return
 
-        status = user.get("status", "")
-        role = user.get("role", "")
-
-        if status == "pending":
-            await message.answer(
-                "Твоя заявка на рассмотрении.\n"
-                "Как только администратор одобрит — я напишу тебе."
+        except Exception as e:
+            logger.error(f"Ошибка проверки пользователя: {e}")
+            # При ошибке — предлагаем запросить доступ
+            keyboard = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Запросить доступ", request_contact=True)]],
+                resize_keyboard=True,
+                one_time_keyboard=True
             )
-            return
-
-        if status == "rejected":
-            await message.answer("К сожалению, твоя заявка была отклонена.")
-            return
-
-        if status == "approved":
-            role_text = {
-                "manager": "менеджер",
-                "team_lead": "руководитель",
-                "admin": "администратор"
-            }.get(role, role)
-
-            keyboard = None
-            if WEBAPP_URL:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="Мой профиль навыков", web_app=WebAppInfo(url=WEBAPP_URL))
-                ]])
-
             await message.answer(
-                f"С возвращением! Твоя роль: {role_text}\n\n"
-                "Команды:\n"
-                "/modules — список модулей обучения\n"
-                "/profile — профиль навыков",
+                "Привет! Я бот Академии INSTINTO.\n\n"
+                "Для доступа нажмите кнопку и поделитесь контактом.",
                 reply_markup=keyboard
             )
-            return
 
         # Неизвестный статус
         await message.answer("Что-то пошло не так. Напиши администратору.")
@@ -214,12 +228,25 @@ class AcademyBot:
     async def cmd_modules(self, message: Message):
         """Показывает список модулей."""
         user_id = message.from_user.id
+        username = message.from_user.username or str(user_id)
 
-        # Проверяем доступ (админ или approved пользователь)
+        # Проверяем доступ (админ или approved пользователь в PostgreSQL)
         if user_id != ADMIN_ID:
-            user = get_user(self.spreadsheet, user_id)
-            if not user or user.get("status") != "approved":
-                await message.answer("У тебя нет доступа. Напиши /start чтобы запросить.")
+            from web_auth import get_db
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+                cur.execute("SELECT id FROM web_users WHERE telegram_username = %s", (username,))
+                web_user = cur.fetchone()
+                cur.close()
+                conn.close()
+
+                if not web_user:
+                    await message.answer("У тебя нет доступа. Напиши /start чтобы запросить.")
+                    return
+            except Exception as e:
+                logger.error(f"Ошибка проверки доступа: {e}")
+                await message.answer("Ошибка проверки доступа. Попробуй позже.")
                 return
 
         buttons = []
@@ -251,32 +278,46 @@ class AcademyBot:
             await message.answer("Эта команда только для администратора.")
             return
 
-        pending = get_pending_requests(self.spreadsheet)
+        from web_auth import get_db
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, telegram_username, phone, created_at
+                FROM web_access_requests
+                WHERE status = 'pending'
+                ORDER BY created_at DESC
+            """)
+            pending = cur.fetchall()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка получения заявок: {e}")
+            await message.answer("Ошибка получения заявок.")
+            return
 
         if not pending:
             await message.answer("Нет заявок на рассмотрении.")
             return
 
         for req in pending:
-            tid = req.get("telegram_id", "")
-            name = req.get("name", "Без имени")
-            username = req.get("username", "")
-            requested_at = req.get("requested_at", "")[:10]  # только дата
+            request_id = req["id"]
+            username = req.get("telegram_username", "")
+            phone = req.get("phone", "")
+            created_at = str(req.get("created_at", ""))[:10]
 
             text = f"<b>Заявка на доступ</b>\n\n"
-            text += f"Имя: {name}\n"
-            if username:
-                text += f"Username: @{username}\n"
-            text += f"ID: {tid}\n"
-            text += f"Дата: {requested_at}"
+            text += f"Username: @{username}\n"
+            if phone:
+                text += f"Телефон: {phone}\n"
+            text += f"Дата: {created_at}\n"
+            text += f"ID заявки: {request_id}"
 
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="Менеджер", callback_data=f"approve:{tid}:manager"),
-                    InlineKeyboardButton(text="Руководитель", callback_data=f"approve:{tid}:team_lead")
-                ],
-                [
-                    InlineKeyboardButton(text="Отклонить", callback_data=f"reject:{tid}")
+                    InlineKeyboardButton(text="Одобрить", callback_data=f"web_approve:{request_id}"),
+                    InlineKeyboardButton(text="Отклонить", callback_data=f"web_reject:{request_id}")
                 ]
             ])
 
