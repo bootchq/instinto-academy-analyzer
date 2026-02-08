@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, List, Sequence
 import gspread
 from google.oauth2.service_account import Credentials
 
+from . import time_utils
+
 
 def open_spreadsheet(*, spreadsheet_id: str, service_account_json_path: str) -> gspread.Spreadsheet:
     """
@@ -230,8 +232,6 @@ def create_access_request(
     username: str | None = None
 ) -> bool:
     """Создаёт заявку на доступ."""
-    from datetime import datetime, timezone
-
     try:
         # Проверяем, нет ли уже заявки
         existing = get_user(ss, telegram_id)
@@ -244,7 +244,7 @@ def create_access_request(
             username or "",
             "",  # role - пусто пока не одобрено
             "pending",  # status
-            datetime.now(timezone.utc).isoformat(),  # requested_at
+            time_utils.utc_now().isoformat(),  # requested_at
             "",  # approved_at
             ""   # approved_by
         ]
@@ -263,8 +263,6 @@ def approve_user(
     approved_by: int | str
 ) -> bool:
     """Одобряет пользователя и назначает роль."""
-    from datetime import datetime, timezone
-
     try:
         ws = ss.worksheet("users")
         values = ws.get_all_values()
@@ -283,7 +281,7 @@ def approve_user(
                 # Обновляем ячейки
                 ws.update_cell(row_num, role_idx + 1, role)
                 ws.update_cell(row_num, status_idx + 1, "approved")
-                ws.update_cell(row_num, approved_at_idx + 1, datetime.now(timezone.utc).isoformat())
+                ws.update_cell(row_num, approved_at_idx + 1, time_utils.utc_now().isoformat())
                 ws.update_cell(row_num, approved_by_idx + 1, str(approved_by))
                 return True
         return False

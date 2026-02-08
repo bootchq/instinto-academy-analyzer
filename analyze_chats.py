@@ -26,6 +26,8 @@ os.environ['TZ'] = 'Europe/Moscow'
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from shared import time_utils
+
 # Лимит чатов за один запуск (при 60с паузе = 10 минут)
 MAX_CHATS_PER_RUN = 10
 
@@ -496,7 +498,7 @@ def main():
                     "missed_opportunities": json.dumps(analysis.get("missed_opportunities", []), ensure_ascii=False),
                     "is_ethical": analysis.get("is_ethical", True),
                     "summary": analysis.get("summary", ""),
-                    "analyzed_at": datetime.now(timezone.utc).isoformat(),
+                    "analyzed_at": time_utils.utc_now().isoformat(),
                 }
                 results.append(result)
 

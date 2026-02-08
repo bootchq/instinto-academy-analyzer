@@ -5,6 +5,8 @@ import traceback
 import requests
 from datetime import datetime, timezone
 
+from . import time_utils
+
 ADMIN_ID = 57186925
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
@@ -31,7 +33,7 @@ def send_telegram(chat_id: int, text: str, parse_mode: str = "HTML"):
 def alert_error(service_name: str, error: Exception, context: str = ""):
     """Отправить алерт об ошибке."""
     tb = traceback.format_exc()
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    timestamp = time_utils.utc_now().strftime("%Y-%m-%d %H:%M UTC")
 
     text = f"🔴 <b>ОШИБКА: {service_name}</b>\n\n"
     text += f"⏰ {timestamp}\n"
@@ -46,7 +48,7 @@ def alert_error(service_name: str, error: Exception, context: str = ""):
 
 def alert_success(service_name: str, message: str, stats: dict = None):
     """Отправить алерт об успешном выполнении."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    timestamp = time_utils.utc_now().strftime("%Y-%m-%d %H:%M UTC")
 
     text = f"🟢 <b>{service_name}</b>\n\n"
     text += f"⏰ {timestamp}\n"
@@ -63,7 +65,7 @@ def alert_success(service_name: str, message: str, stats: dict = None):
 
 def alert_warning(service_name: str, message: str):
     """Отправить предупреждение (опционально, для будущего)."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    timestamp = time_utils.utc_now().strftime("%Y-%m-%d %H:%M UTC")
 
     text = f"🟡 <b>ПРЕДУПРЕЖДЕНИЕ: {service_name}</b>\n\n"
     text += f"⏰ {timestamp}\n"

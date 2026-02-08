@@ -42,6 +42,7 @@ from shared.sheets_academy import (
     open_spreadsheet,
     append_to_worksheet
 )
+from shared import time_utils
 
 # Веб-авторизация
 from web_auth import approve_web_request, reject_web_request, run_api_server, save_telegram_user
@@ -777,7 +778,7 @@ class AcademyBot:
     ):
         """Записывает прогресс в Google Sheets."""
         try:
-            now = datetime.now(timezone.utc).isoformat()
+            now = time_utils.utc_now().isoformat()
 
             row = [
                 manager_id,

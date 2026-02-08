@@ -29,6 +29,7 @@ from typing import Any, Dict, List
 from shared.telegram_notifier import TelegramNotifier
 from shared.report_formatter import SKILL_NAMES, calculate_skill_averages, find_weakest_skills, format_report
 from shared.sheets_academy import open_spreadsheet, get_all_users
+from shared import time_utils
 
 
 # ID админа для сводного отчёта
@@ -47,7 +48,7 @@ def load_analysis_data(ss, days: int = 7) -> List[Dict[str, Any]]:
         return []
 
     # Фильтруем по дате (если есть analyzed_at)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = time_utils.utc_now() - timedelta(days=days)
     filtered = []
 
     for row in data:
