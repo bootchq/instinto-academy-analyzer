@@ -46,7 +46,7 @@ from shared.sheets_academy import (
 )
 
 # Веб-авторизация
-from web_auth import approve_web_request, reject_web_request, run_api_server
+from web_auth import approve_web_request, reject_web_request, run_api_server, save_telegram_user
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -122,11 +122,14 @@ class AcademyBot:
     async def cmd_start(self, message: Message):
         """Обработчик /start."""
         user_id = message.from_user.id
-        username = message.from_user.username
+        username = message.from_user.username or str(user_id)
         name = message.from_user.full_name
 
         # ЛОГИРОВАНИЕ для получения Telegram ID новых пользователей (Бика, Ниса)
         logger.info(f"👤 /start от: {name} (@{username}) | ID: {user_id}")
+
+        # Сохраняем telegram_id для веб-авторизации
+        save_telegram_user(user_id, username, name)
 
         # Админ всегда имеет доступ
         if user_id == ADMIN_ID:
@@ -401,7 +404,7 @@ class AcademyBot:
         # web_approve:123
         request_id = int(callback.data.split(":")[1])
 
-        telegram_username, login, password = approve_web_request(request_id)
+        telegram_username, telegram_id, login, password = approve_web_request(request_id)
 
         if telegram_username:
             # Обновляем сообщение админу
@@ -419,16 +422,27 @@ class AcademyBot:
                 f"Скопируйте логин и пароль — они понадобятся для входа."
             )
 
-            # Ищем пользователя по username для отправки сообщения
-            # К сожалению, Telegram API не позволяет отправлять по username напрямую
-            # Пользователь должен сам написать боту /start
-            logger.info(f"Учётные данные для @{telegram_username}: login={login}")
-
-            # Уведомляем админа что нужно переслать данные
-            await callback.message.answer(
-                f"Данные для @{telegram_username}:\n\n{credentials_text}\n\n"
-                f"Перешлите это сообщение пользователю @{telegram_username}"
-            )
+            if telegram_id:
+                # Отправляем напрямую пользователю
+                try:
+                    await self.bot.send_message(telegram_id, credentials_text)
+                    await callback.message.answer(f"Данные отправлены пользователю @{telegram_username}")
+                    logger.info(f"Учётные данные отправлены пользователю {telegram_id} (@{telegram_username})")
+                except Exception as e:
+                    logger.error(f"Не удалось отправить данные пользователю {telegram_id}: {e}")
+                    await callback.message.answer(
+                        f"Не удалось отправить данные пользователю.\n\n"
+                        f"Данные для @{telegram_username}:\n\n{credentials_text}\n\n"
+                        f"Перешлите это сообщение пользователю @{telegram_username}"
+                    )
+            else:
+                # Пользователь не писал боту — нужно переслать вручную
+                logger.info(f"Учётные данные для @{telegram_username}: login={login} (telegram_id не найден)")
+                await callback.message.answer(
+                    f"Пользователь @{telegram_username} ещё не писал боту.\n\n"
+                    f"Данные для @{telegram_username}:\n\n{credentials_text}\n\n"
+                    f"Перешлите это сообщение пользователю @{telegram_username}"
+                )
         else:
             await callback.message.answer("Ошибка при одобрении. Заявка не найдена или уже обработана.")
 

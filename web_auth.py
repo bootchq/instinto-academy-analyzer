@@ -268,7 +268,7 @@ def check_auth():
 def approve_web_request(request_id: int) -> tuple:
     """
     Одобряет заявку и создаёт пользователя.
-    Возвращает (telegram_username, login, password) или (None, None, None).
+    Возвращает (telegram_username, telegram_id, login, password) или (None, None, None, None).
     """
     try:
         conn = get_db()
@@ -282,7 +282,7 @@ def approve_web_request(request_id: int) -> tuple:
         req = cur.fetchone()
 
         if not req:
-            return None, None, None
+            return None, None, None, None
 
         telegram_username = req["telegram_username"]
 
@@ -302,15 +302,71 @@ def approve_web_request(request_id: int) -> tuple:
             (request_id,)
         )
 
+        # Ищем telegram_id пользователя
+        username_clean = telegram_username.replace("@", "").replace("+", "")
+        cur.execute(
+            "SELECT telegram_id FROM telegram_users WHERE username = %s OR username = %s",
+            (username_clean, telegram_username)
+        )
+        tg_user = cur.fetchone()
+        telegram_id = tg_user["telegram_id"] if tg_user else None
+
         conn.commit()
         cur.close()
         conn.close()
 
-        return telegram_username, login, password
+        return telegram_username, telegram_id, login, password
 
     except Exception as e:
         logger.error(f"Ошибка одобрения заявки: {e}")
-        return None, None, None
+        return None, None, None, None
+
+
+def save_telegram_user(telegram_id: int, username: str, full_name: str):
+    """Сохраняет telegram_id пользователя для последующей отправки сообщений."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO telegram_users (telegram_id, username, full_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                full_name = EXCLUDED.full_name
+        """, (telegram_id, username, full_name))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения telegram user: {e}")
+        return False
+
+
+def get_telegram_id_by_username(username: str) -> int:
+    """Получает telegram_id по username."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        # Убираем @ если есть
+        username = username.replace("@", "").replace("+", "")
+
+        cur.execute(
+            "SELECT telegram_id FROM telegram_users WHERE username = %s OR username = %s",
+            (username, f"+{username}")
+        )
+        result = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        return result["telegram_id"] if result else None
+    except Exception as e:
+        logger.error(f"Ошибка получения telegram_id: {e}")
+        return None
 
 
 def reject_web_request(request_id: int) -> str:
