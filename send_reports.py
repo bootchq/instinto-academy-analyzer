@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import traceback
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
