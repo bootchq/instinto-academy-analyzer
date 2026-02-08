@@ -3,3 +3,6 @@ env
 *.pyc
 __pycache__/
 .venv/
+temp_service_account.json
+RAILWAY_*.md
+railway_api.py

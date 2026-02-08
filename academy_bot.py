@@ -6,6 +6,7 @@ Telegram бот для Академии INSTINTO.
 - Показывает урок
 - Проводит тест
 - Записывает прогресс в Google Sheets
+- Веб-авторизация: одобрение заявок и отправка логина/пароля
 
 Использование:
     python academy_bot.py
@@ -14,6 +15,7 @@ Telegram бот для Академии INSTINTO.
     TELEGRAM_BOT_TOKEN=...
     GOOGLE_SHEETS_ID=...
     GOOGLE_SERVICE_ACCOUNT_JSON=...
+    DATABASE_URL=... (для веб-авторизации)
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import asyncio
 import json
 import os
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -41,6 +44,9 @@ from shared.sheets_academy import (
     reject_user,
     get_pending_requests
 )
+
+# Веб-авторизация
+from web_auth import approve_web_request, reject_web_request, run_api_server
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -90,10 +96,14 @@ class AcademyBot:
         self.dp.message.register(self.cmd_pending, Command("pending"))
         self.dp.message.register(self.cmd_profile, Command("profile"))
 
-        # Callbacks: система доступа
+        # Callbacks: система доступа (Telegram)
         self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
         self.dp.callback_query.register(self.on_approve, F.data.startswith("approve:"))
         self.dp.callback_query.register(self.on_reject, F.data.startswith("reject:"))
+
+        # Callbacks: веб-авторизация
+        self.dp.callback_query.register(self.on_web_approve, F.data.startswith("web_approve:"))
+        self.dp.callback_query.register(self.on_web_reject, F.data.startswith("web_reject:"))
 
         # Callbacks: обучение
         self.dp.callback_query.register(self.on_module_start, F.data.startswith("module:"))
@@ -380,6 +390,68 @@ class AcademyBot:
         else:
             await callback.message.answer("Ошибка при отклонении. Попробуй ещё раз.")
 
+    async def on_web_approve(self, callback: CallbackQuery):
+        """Обработчик одобрения веб-заявки."""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Только админ может одобрять заявки", show_alert=True)
+            return
+
+        await callback.answer()
+
+        # web_approve:123
+        request_id = int(callback.data.split(":")[1])
+
+        telegram_username, login, password = approve_web_request(request_id)
+
+        if telegram_username:
+            # Обновляем сообщение админу
+            await callback.message.edit_text(
+                callback.message.text + f"\n\n✅ Одобрено\nЛогин: {login}"
+            )
+
+            # Отправляем логин/пароль пользователю
+            credentials_text = (
+                f"<b>Доступ к Академии INSTINTO одобрен!</b>\n\n"
+                f"Ваши данные для входа:\n"
+                f"<b>Логин:</b> <code>{login}</code>\n"
+                f"<b>Пароль:</b> <code>{password}</code>\n\n"
+                f"Сайт: https://academy-modules.vercel.app\n\n"
+                f"Скопируйте логин и пароль — они понадобятся для входа."
+            )
+
+            # Ищем пользователя по username для отправки сообщения
+            # К сожалению, Telegram API не позволяет отправлять по username напрямую
+            # Пользователь должен сам написать боту /start
+            logger.info(f"Учётные данные для @{telegram_username}: login={login}")
+
+            # Уведомляем админа что нужно переслать данные
+            await callback.message.answer(
+                f"Данные для @{telegram_username}:\n\n{credentials_text}\n\n"
+                f"Перешлите это сообщение пользователю @{telegram_username}"
+            )
+        else:
+            await callback.message.answer("Ошибка при одобрении. Заявка не найдена или уже обработана.")
+
+    async def on_web_reject(self, callback: CallbackQuery):
+        """Обработчик отклонения веб-заявки."""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Только админ может отклонять заявки", show_alert=True)
+            return
+
+        await callback.answer()
+
+        # web_reject:123
+        request_id = int(callback.data.split(":")[1])
+
+        telegram_username = reject_web_request(request_id)
+
+        if telegram_username:
+            await callback.message.edit_text(
+                callback.message.text + "\n\n❌ Отклонено"
+            )
+        else:
+            await callback.message.answer("Ошибка при отклонении. Заявка не найдена или уже обработана.")
+
     async def on_module_start(self, callback: CallbackQuery):
         """Обработчик нажатия на кнопку модуля."""
         await callback.answer()
@@ -517,16 +589,26 @@ class AcademyBot:
             logger.error(f"Ошибка записи прогресса: {e}")
 
     async def run(self):
-        """Запускает бота."""
+        """Запускает бота и веб-сервер."""
+        # Запускаем Flask API в отдельном потоке
+        api_port = int(os.environ.get("PORT", 5000))
+        api_thread = threading.Thread(
+            target=run_api_server,
+            kwargs={"host": "0.0.0.0", "port": api_port},
+            daemon=True
+        )
+        api_thread.start()
+        logger.info(f"API сервер запущен на порту {api_port}")
+
         # Удаляем webhook если был и сбрасываем старые апдейты
         await self.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Бот запущен")
+        logger.info("Telegram бот запущен")
 
         # Уведомление об успешном запуске через централизованную систему алертов
         from shared.alerting import alert_success
         alert_success(
             service_name="bot-obrabotchik-komand",
-            message="Бот запущен и работает"
+            message="Бот и API сервер запущены"
         )
 
         await self.dp.start_polling(self.bot, allowed_updates=["message", "callback_query"])
