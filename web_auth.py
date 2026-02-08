@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timedelta
 from functools import wraps
 
+import bcrypt
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Flask, request, jsonify
@@ -32,7 +33,10 @@ app = Flask(__name__)
 CORS(app, origins=["https://academy-modules.vercel.app", "http://localhost:*"])
 
 # Секретный ключ для JWT
-JWT_SECRET = os.environ.get("JWT_SECRET", "instinto-academy-secret-key-2024")
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    logger.error("КРИТИЧНО: JWT_SECRET не установлен в переменных окружения!")
+    raise ValueError("JWT_SECRET обязателен для работы веб-авторизации")
 JWT_EXPIRY_HOURS = 24 * 7  # Токен на неделю
 
 # Telegram для уведомлений
@@ -66,8 +70,51 @@ def run_migrations():
 
 
 def hash_password(password: str) -> str:
-    """Хеширует пароль."""
+    """
+    Хеширует пароль используя bcrypt.
+    DEPRECATED: Используй hash_password_bcrypt() напрямую.
+    """
+    return hash_password_bcrypt(password)
+
+
+def hash_password_bcrypt(password: str) -> str:
+    """Хеширует пароль используя bcrypt."""
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+
+def hash_password_sha256_legacy(password: str) -> str:
+    """Старый SHA256 хеш (только для проверки совместимости)."""
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """
+    Проверяет пароль против хеша (поддерживает SHA256 и bcrypt).
+
+    Автоматически определяет формат по длине/префиксу:
+    - bcrypt: начинается с $2b$ (60 символов)
+    - SHA256: hex строка (64 символа)
+    """
+    if not stored_hash:
+        return False
+
+    # Проверяем формат bcrypt
+    if stored_hash.startswith('$2b$') or stored_hash.startswith('$2a$'):
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8'))
+        except Exception as e:
+            logger.error(f"Ошибка проверки bcrypt пароля: {e}")
+            return False
+
+    # Fallback на старый SHA256 (для совместимости)
+    elif len(stored_hash) == 64 and all(c in '0123456789abcdef' for c in stored_hash):
+        legacy_hash = hash_password_sha256_legacy(password)
+        return legacy_hash == stored_hash
+
+    # Неизвестный формат
+    logger.warning(f"Неизвестный формат хеша пароля (длина={len(stored_hash)})")
+    return False
 
 
 def generate_credentials():
@@ -230,15 +277,31 @@ def login():
         conn = get_db()
         cur = conn.cursor()
 
-        password_hash = hash_password(password)
+        # Получаем пользователя по логину (без проверки пароля)
         cur.execute(
-            "SELECT id, login, role FROM web_users WHERE login = %s AND password_hash = %s",
-            (login_value, password_hash)
+            "SELECT id, login, role, password_hash FROM web_users WHERE login = %s",
+            (login_value,)
         )
         user = cur.fetchone()
 
         if not user:
             return jsonify({"error": "Неверный логин или пароль"}), 401
+
+        # Проверяем пароль (поддерживаем SHA256 и bcrypt)
+        if not verify_password(password, user["password_hash"]):
+            return jsonify({"error": "Неверный логин или пароль"}), 401
+
+        # Если пользователь использовал старый SHA256 хеш — обновляем на bcrypt
+        stored_hash = user["password_hash"]
+        is_legacy_hash = len(stored_hash) == 64 and all(c in '0123456789abcdef' for c in stored_hash)
+
+        if is_legacy_hash:
+            logger.info(f"Обновляю устаревший SHA256 хеш на bcrypt для пользователя {login_value}")
+            new_hash = hash_password_bcrypt(password)
+            cur.execute(
+                "UPDATE web_users SET password_hash = %s WHERE id = %s",
+                (new_hash, user["id"])
+            )
 
         # Обновляем last_login
         cur.execute(
