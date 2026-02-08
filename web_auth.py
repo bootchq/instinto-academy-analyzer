@@ -177,6 +177,41 @@ def debug_stats():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/debug-create-test-user", methods=["POST"])
+def debug_create_test_user():
+    """Временный endpoint для создания тестового пользователя (удалить после тестирования)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        test_login = "test_user_123"
+        test_password = "test_pass_456"
+        password_hash = hash_password(test_password)
+
+        # Удаляем если существует
+        cur.execute("DELETE FROM web_users WHERE login = %s", (test_login,))
+
+        # Создаём тестового пользователя
+        cur.execute(
+            "INSERT INTO web_users (telegram_username, login, password_hash, role) VALUES (%s, %s, %s, 'student')",
+            ("test_claude", test_login, password_hash)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "success": True,
+            "login": test_login,
+            "password": test_password,
+            "note": "Удалить этот endpoint после тестирования!"
+        })
+    except Exception as e:
+        logger.error(f"Create test user error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/clear-auth", methods=["POST"])
 def clear_auth():
     """Очищает все данные авторизации (только для тестирования)."""
