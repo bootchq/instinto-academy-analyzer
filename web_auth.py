@@ -55,6 +55,8 @@ def run_migrations():
         cur = conn.cursor()
         # Добавляем колонку phone если её нет
         cur.execute("ALTER TABLE web_access_requests ADD COLUMN IF NOT EXISTS phone VARCHAR(50)")
+        # Удаляем тестового пользователя если есть
+        cur.execute("DELETE FROM web_users WHERE login = 'test_user_123'")
         conn.commit()
         cur.close()
         conn.close()
@@ -143,102 +145,6 @@ def send_telegram_notification(chat_id: int, text: str, reply_markup: dict = Non
 def health():
     """Проверка работоспособности."""
     return jsonify({"status": "ok", "service": "academy-auth"})
-
-
-@app.route("/api/debug-stats", methods=["GET"])
-def debug_stats():
-    """Временный endpoint для проверки состояния базы (удалить после тестирования)."""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        # Количество пользователей
-        cur.execute("SELECT COUNT(*) as cnt FROM web_users")
-        users_count = cur.fetchone()["cnt"]
-
-        # Количество заявок
-        cur.execute("SELECT status, COUNT(*) as cnt FROM web_access_requests GROUP BY status")
-        requests_stats = {row["status"]: row["cnt"] for row in cur.fetchall()}
-
-        # Последний пользователь (без пароля)
-        cur.execute("SELECT login, telegram_username, role, created_at FROM web_users ORDER BY created_at DESC LIMIT 1")
-        last_user = cur.fetchone()
-
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "users_count": users_count,
-            "requests": requests_stats,
-            "last_user": dict(last_user) if last_user else None
-        })
-    except Exception as e:
-        logger.error(f"Debug stats error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/debug-create-test-user", methods=["POST"])
-def debug_create_test_user():
-    """Временный endpoint для создания тестового пользователя (удалить после тестирования)."""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        test_login = "test_user_123"
-        test_password = "test_pass_456"
-        password_hash = hash_password(test_password)
-
-        # Удаляем если существует
-        cur.execute("DELETE FROM web_users WHERE login = %s", (test_login,))
-
-        # Создаём тестового пользователя
-        cur.execute(
-            "INSERT INTO web_users (telegram_username, login, password_hash, role) VALUES (%s, %s, %s, 'student')",
-            ("test_claude", test_login, password_hash)
-        )
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "success": True,
-            "login": test_login,
-            "password": test_password,
-            "note": "Удалить этот endpoint после тестирования!"
-        })
-    except Exception as e:
-        logger.error(f"Create test user error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/clear-auth", methods=["POST"])
-def clear_auth():
-    """Очищает все данные авторизации (только для тестирования)."""
-    try:
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute("DELETE FROM web_users")
-        users = cur.rowcount
-
-        cur.execute("DELETE FROM web_access_requests")
-        requests = cur.rowcount
-
-        cur.execute("DELETE FROM telegram_users")
-        tg = cur.rowcount
-
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        return jsonify({
-            "success": True,
-            "deleted": {"web_users": users, "web_access_requests": requests, "telegram_users": tg}
-        })
-    except Exception as e:
-        logger.error(f"Ошибка очистки: {e}")
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/request-access", methods=["POST"])
