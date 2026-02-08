@@ -145,6 +145,38 @@ def health():
     return jsonify({"status": "ok", "service": "academy-auth"})
 
 
+@app.route("/api/debug-stats", methods=["GET"])
+def debug_stats():
+    """Временный endpoint для проверки состояния базы (удалить после тестирования)."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        # Количество пользователей
+        cur.execute("SELECT COUNT(*) as cnt FROM web_users")
+        users_count = cur.fetchone()["cnt"]
+
+        # Количество заявок
+        cur.execute("SELECT status, COUNT(*) as cnt FROM web_access_requests GROUP BY status")
+        requests_stats = {row["status"]: row["cnt"] for row in cur.fetchall()}
+
+        # Последний пользователь (без пароля)
+        cur.execute("SELECT login, telegram_username, role, created_at FROM web_users ORDER BY created_at DESC LIMIT 1")
+        last_user = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            "users_count": users_count,
+            "requests": requests_stats,
+            "last_user": dict(last_user) if last_user else None
+        })
+    except Exception as e:
+        logger.error(f"Debug stats error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/clear-auth", methods=["POST"])
 def clear_auth():
     """Очищает все данные авторизации (только для тестирования)."""
