@@ -18,6 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+
+# Устанавливаем Moscow timezone для всех datetime операций
+os.environ['TZ'] = 'Europe/Moscow'
+
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List

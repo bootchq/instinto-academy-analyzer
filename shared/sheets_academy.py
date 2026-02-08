@@ -67,7 +67,25 @@ def upsert_worksheet(
         ws.clear()
     if not rows:
         return
-    ws.update(values=list(rows), range_name="A1")
+
+    # Проверяем что лист достаточно большой для данных
+    try:
+        needed_rows = len(rows)
+        needed_cols = max(len(r) for r in rows) if rows else 0
+        current_rows = ws.row_count
+        current_cols = ws.col_count
+
+        if needed_rows > current_rows or needed_cols > current_cols:
+            ws.resize(
+                rows=max(needed_rows + 10, current_rows),  # +10 для запаса
+                cols=max(needed_cols + 5, current_cols)
+            )
+
+        ws.update(values=list(rows), range_name="A1")
+    except Exception as e:
+        # Логируем ошибку но не падаем
+        print(f"Ошибка обновления листа {title}: {e}")
+        raise  # Re-raise чтобы вызывающий код знал об ошибке
 
 
 def append_to_worksheet(

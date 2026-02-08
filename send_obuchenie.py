@@ -16,6 +16,10 @@
 from __future__ import annotations
 
 import os
+
+# Устанавливаем Moscow timezone для всех datetime операций
+os.environ['TZ'] = 'Europe/Moscow'
+
 from typing import List
 
 from shared.telegram_notifier import TelegramNotifier, SKILL_NAMES

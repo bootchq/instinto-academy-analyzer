@@ -24,6 +24,9 @@ import asyncio
 import json
 import os
 import logging
+
+# Устанавливаем Moscow timezone для всех datetime операций
+os.environ['TZ'] = 'Europe/Moscow'
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
