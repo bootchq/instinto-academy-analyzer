@@ -131,6 +131,12 @@ class AcademyBot:
         # Сохраняем telegram_id для веб-авторизации
         save_telegram_user(user_id, username, name)
 
+        # Проверяем deep-link параметр (start=access с сайта)
+        args = message.text.split(maxsplit=1)
+        if len(args) > 1 and args[1] == "access":
+            await self._handle_web_access_request(message)
+            return
+
         # Админ всегда имеет доступ
         if user_id == ADMIN_ID:
             keyboard = None
@@ -321,6 +327,91 @@ class AcademyBot:
                 "Заявка уже была отправлена ранее.\n"
                 "Ожидай решения администратора."
             )
+
+    async def _handle_web_access_request(self, message: Message):
+        """Обработчик запроса доступа с сайта через deep-link."""
+        from web_auth import get_db, send_telegram_notification, ADMIN_ID as WEB_ADMIN_ID
+
+        user = message.from_user
+        user_id = user.id
+        username = user.username or str(user_id)
+        name = user.full_name or user.first_name or "Без имени"
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Проверяем, есть ли уже пользователь с доступом
+            cur.execute(
+                "SELECT id, login FROM web_users WHERE telegram_username = %s",
+                (username,)
+            )
+            existing_user = cur.fetchone()
+
+            if existing_user:
+                await message.answer(
+                    "У вас уже есть доступ к Академии!\n\n"
+                    f"Ваш логин: <code>{existing_user['login']}</code>\n\n"
+                    "Сайт: https://academy-modules.vercel.app"
+                )
+                cur.close()
+                conn.close()
+                return
+
+            # Проверяем, есть ли уже заявка
+            cur.execute(
+                "SELECT id, status FROM web_access_requests WHERE telegram_username = %s ORDER BY created_at DESC LIMIT 1",
+                (username,)
+            )
+            existing_request = cur.fetchone()
+
+            if existing_request:
+                if existing_request["status"] == "pending":
+                    await message.answer(
+                        "Ваша заявка уже отправлена и ожидает рассмотрения.\n"
+                        "Как только администратор одобрит — я пришлю вам логин и пароль."
+                    )
+                    cur.close()
+                    conn.close()
+                    return
+
+            # Создаём заявку
+            cur.execute(
+                "INSERT INTO web_access_requests (telegram_username, status) VALUES (%s, 'pending') RETURNING id",
+                (username,)
+            )
+            request_id = cur.fetchone()["id"]
+            conn.commit()
+
+            await message.answer(
+                "Заявка на доступ отправлена!\n\n"
+                "Как только администратор одобрит — я пришлю вам логин и пароль для входа на сайт Академии."
+            )
+
+            # Уведомляем админа
+            text = (
+                f"<b>Новая заявка на доступ к Академии (с сайта)</b>\n\n"
+                f"Имя: {name}\n"
+                f"Username: @{username}\n"
+                f"Telegram ID: {user_id}\n"
+                f"ID заявки: {request_id}"
+            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Одобрить", callback_data=f"web_approve:{request_id}"),
+                InlineKeyboardButton(text="Отклонить", callback_data=f"web_reject:{request_id}")
+            ]])
+
+            try:
+                await self.bot.send_message(ADMIN_ID, text, reply_markup=keyboard)
+            except Exception as e:
+                logger.error(f"Не удалось уведомить админа: {e}")
+
+            cur.close()
+            conn.close()
+
+        except Exception as e:
+            logger.error(f"Ошибка создания заявки с сайта: {e}")
+            await message.answer("Произошла ошибка. Попробуйте позже.")
 
     async def on_approve(self, callback: CallbackQuery):
         """Обработчик одобрения заявки."""
