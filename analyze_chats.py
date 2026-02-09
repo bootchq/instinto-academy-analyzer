@@ -179,7 +179,7 @@ def format_dialog(messages: List[Dict[str, Any]]) -> str:
     lines = []
     for msg in messages:
         direction = msg.get("direction", "")
-        text = msg.get("text", "").strip()
+        text = str(msg.get("text", "")).strip()
         if not text:
             continue
 
