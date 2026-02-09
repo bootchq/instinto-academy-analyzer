@@ -621,7 +621,44 @@ def main():
             rows = dicts_to_table(results, header=header)
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
-            # Тихое завершение — без уведомлений (сводка отправляется утром отдельным скриптом)
+            # Ежедневная сводка админу (БЕЗ alert_success - только сводка)
+            from shared.alerting import send_telegram, ADMIN_ID
+            from collections import defaultdict
+
+            by_manager = defaultdict(list)
+            for r in results:
+                name = r.get("manager_name") or r.get("manager_id") or "Неизвестный"
+                by_manager[name].append(r)
+
+            skill_labels = {
+                "greeting_score": "Привет",
+                "needs_score": "Потреб",
+                "presentation_score": "Презент",
+                "objection_score": "Возраж",
+                "closing_score": "Закрыт",
+                "cross_sell_score": "Допрод",
+            }
+            skill_keys = list(skill_labels.keys())
+
+            lines = ["<b>📊 Анализ чатов за сегодня</b>\n"]
+            for mgr_name, mgr_results in sorted(by_manager.items(), key=lambda x: -len(x[1])):
+                avgs = {}
+                for sk in skill_keys:
+                    # Делим на 10 т.к. хранится как 52 вместо 5.2
+                    vals = [float(r.get(sk, 0)) / 10 for r in mgr_results if r.get(sk) and float(r.get(sk, 0)) > 0]
+                    avgs[sk] = round(sum(vals) / len(vals), 1) if vals else 0
+
+                # Делим на 10 для overall_score
+                overall_vals = [float(r.get("overall_score", 0)) / 10 for r in mgr_results if r.get("overall_score") and float(r.get("overall_score", 0)) > 10]
+                overall = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else 0
+
+                lines.append(f"<b>{mgr_name}</b>: {len(mgr_results)} чатов, общая {overall}/10")
+                scores_str = " | ".join(f"{skill_labels[sk]}: {avgs[sk]}" for sk in skill_keys if avgs[sk] > 0)
+                if scores_str:
+                    lines.append(f"  {scores_str}")
+                lines.append("")
+
+            send_telegram(ADMIN_ID, "\n".join(lines))
             print(f"Готово! Проанализировано: {len(results)}, ошибок: {errors}")
         else:
             msg = f"Академия INSTINTO: анализ завершён, но результатов нет"
