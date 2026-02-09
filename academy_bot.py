@@ -384,20 +384,14 @@ class AcademyBot:
             phone = s["phone"] or "—"
             completed = s["modules_completed"] or 0
             avg = s["avg_score"] if s["avg_score"] is not None else "—"
-            total_sec = s["total_time_seconds"] or 0
-
-            hours = total_sec // 3600
-            minutes = (total_sec % 3600) // 60
-            time_str = f"{hours}ч {minutes}м" if hours > 0 else (f"{minutes}м" if total_sec > 0 else "—")
 
             bar = "\u2588" * completed + "\u2591" * (14 - completed)
 
             lines.append(
-                f"<b>{name}</b>\n"
-                f"Тел: {phone}\n"
-                f"Модули: {completed}/14 [{bar}]\n"
-                f"Ср. балл: {avg}/10\n"
-                f"Время: {time_str}\n"
+                f"\n<b>{name}</b>\n"
+                f"  Тел: {phone}\n"
+                f"  Модули: {completed}/14 [{bar}]\n"
+                f"  Ср. балл: {avg}/10\n"
             )
 
         # Разбиваем на сообщения по 4000 символов
