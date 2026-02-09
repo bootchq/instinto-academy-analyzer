@@ -234,15 +234,6 @@ def main():
 
         print(f"\nОтправлено персональных отчётов: {reports_sent}")
 
-        alert_success(
-            service_name="send-weeks-reports",
-            message="Еженедельные отчёты отправлены",
-            stats={
-                "Отправлено отчётов": reports_sent,
-                "Всего менеджеров": len(managers)
-            }
-        )
-
     except Exception as e:
         alert_error(
             service_name="send-weeks-reports",

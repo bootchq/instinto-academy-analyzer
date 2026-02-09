@@ -621,55 +621,8 @@ def main():
             rows = dicts_to_table(results, header=header)
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
-            # Уведомление об успехе + сводка по менеджерам
-            from shared.alerting import alert_success, send_telegram, ADMIN_ID
-            from collections import defaultdict
-
-            unique_managers = len(set(r["manager_id"] for r in results if r["manager_id"]))
-
-            alert_success(
-                service_name="analiz_chatov-posredstvom_ai",
-                message="Анализ чатов завершён",
-                stats={
-                    "Проанализировано чатов": len(results),
-                    "Обработано менеджеров": unique_managers,
-                    "Ошибок": errors
-                }
-            )
-
-            # Сводка по каждому менеджеру
-            by_manager = defaultdict(list)
-            for r in results:
-                name = r.get("manager_name") or r.get("manager_id") or "Неизвестный"
-                by_manager[name].append(r)
-
-            skill_labels = {
-                "greeting_score": "Привет",
-                "needs_score": "Потреб",
-                "presentation_score": "Презент",
-                "objection_score": "Возраж",
-                "closing_score": "Закрыт",
-                "cross_sell_score": "Допрод",
-            }
-            skill_keys = list(skill_labels.keys())
-
-            lines = ["<b>Анализ чатов за сегодня</b>\n"]
-            for mgr_name, mgr_results in by_manager.items():
-                avgs = {}
-                for sk in skill_keys:
-                    vals = [float(r.get(sk, 0)) for r in mgr_results if r.get(sk)]
-                    avgs[sk] = round(sum(vals) / len(vals), 1) if vals else 0
-
-                overall_vals = [float(r.get("overall_score", 0)) for r in mgr_results if r.get("overall_score")]
-                overall = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else 0
-
-                lines.append(f"<b>{mgr_name}</b> ({len(mgr_results)} чатов, общ: {overall})")
-                scores_str = " | ".join(f"{skill_labels[sk]}: {avgs[sk]}" for sk in skill_keys)
-                lines.append(f"  {scores_str}")
-                lines.append("")
-
-            send_telegram(ADMIN_ID, "\n".join(lines))
-            print("Готово!")
+            # Тихое завершение — без уведомлений (сводка отправляется утром отдельным скриптом)
+            print(f"Готово! Проанализировано: {len(results)}, ошибок: {errors}")
         else:
             msg = f"Академия INSTINTO: анализ завершён, но результатов нет"
             if errors > 0:
