@@ -272,10 +272,47 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
-    """Загружает чаты и сообщения из Google Sheets."""
+def _parse_date(date_str: str) -> Optional[datetime]:
+    """Парсит дату из строки (ISO формат из Google Sheets)."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    try:
+        # Убираем Z и микросекунды для совместимости
+        clean = date_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(clean)
+    except (ValueError, TypeError):
+        return None
 
-    # Заголовки для expected_headers (фикс для дубликатов)
+
+def _relevant_message_sheets(all_sheets, days_back: int = 7) -> list:
+    """Определяет какие листы messages_YYYY_MM нужно читать."""
+    today = time_utils.today()
+    # За 7 дней назад могут быть 2 месяца (например 28 янв - 3 фев)
+    from datetime import timedelta
+    start_date = today - timedelta(days=days_back)
+
+    needed_months = set()
+    d = start_date
+    while d <= today:
+        needed_months.add(f"messages_{d.strftime('%Y_%m')}")
+        d += timedelta(days=15)  # Прыгаем на 15 дней чтобы покрыть оба месяца
+    needed_months.add(f"messages_{today.strftime('%Y_%m')}")
+
+    # Также добавляем messages_raw как fallback
+    result = []
+    for sheet in all_sheets:
+        if sheet.title in needed_months or sheet.title == "messages_raw":
+            result.append(sheet)
+
+    return result
+
+
+def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
+    """Загружает чаты за последние N дней и их сообщения."""
+
+    from datetime import timedelta
+
+    # Заголовки для expected_headers (фикс для дубликатов в листе)
     chats_header = [
         "chat_id", "channel", "manager_id", "manager_name", "client_id", "order_id",
         "has_order", "payment_status", "payment_status_ru", "is_successful",
@@ -283,42 +320,69 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
     ]
     messages_header = ["chat_id", "message_id", "sent_at", "direction", "manager_id", "text"]
 
+    # Определяем границу даты (7 дней назад от сегодня)
+    cutoff = datetime.combine(
+        time_utils.today() - timedelta(days=days_back),
+        datetime.min.time()
+    )
+    print(f"   Фильтр: чаты с {cutoff.strftime('%Y-%m-%d')} по сегодня")
+
     try:
         chats_ws = ss.worksheet("chats_raw")
         chats_data = chats_ws.get_all_records(expected_headers=chats_header)
-        print(f"   📊 Прочитано чатов из chats_raw: {len(chats_data)}")
+        print(f"   Прочитано чатов из chats_raw: {len(chats_data)}")
     except Exception as e:
         print(f"Ошибка чтения chats_raw: {e}")
         return []
 
-    # Читаем сообщения из всех листов messages_* (разбитых по месяцам)
+    # Фильтруем чаты по дате created_at за последние N дней
+    recent_chats = []
+    skipped_old = 0
+    skipped_no_date = 0
+    for chat in chats_data:
+        created = _parse_date(str(chat.get("created_at", "")))
+        if not created:
+            skipped_no_date += 1
+            continue
+        # Сравниваем без timezone (naive)
+        if created.replace(tzinfo=None) >= cutoff:
+            recent_chats.append(chat)
+        else:
+            skipped_old += 1
+
+    print(f"   За последние {days_back} дней: {len(recent_chats)} чатов")
+    print(f"   Пропущено старых: {skipped_old}, без даты: {skipped_no_date}")
+
+    if not recent_chats:
+        return []
+
+    # Собираем ID нужных чатов для загрузки сообщений
+    needed_chat_ids = {str(c.get("chat_id", "")) for c in recent_chats}
+
+    # Читаем сообщения только из актуальных месяцев
     messages_data = []
     try:
         all_sheets = ss.worksheets()
-        message_sheets = [s for s in all_sheets if s.title.startswith('messages_')]
+        message_sheets = _relevant_message_sheets(all_sheets, days_back)
 
         if not message_sheets:
-            # Fallback на старый формат messages_raw если нет новых листов
-            try:
-                messages_ws = ss.worksheet("messages_raw")
-                message_sheets = [messages_ws]
-                print(f"   ⚠️ Используем старый формат messages_raw")
-            except Exception:
-                print(f"   ⚠️ Не найдены листы messages_* и messages_raw")
-                return []
+            print(f"   Не найдены листы с сообщениями за нужный период")
+            return []
 
-        print(f"   📊 Найдено листов с сообщениями: {len(message_sheets)}")
+        print(f"   Читаю сообщения из {len(message_sheets)} листов: {[s.title for s in message_sheets]}")
 
         for sheet in message_sheets:
             try:
                 sheet_data = sheet.get_all_records(expected_headers=messages_header)
-                messages_data.extend(sheet_data)
-                print(f"   📝 {sheet.title}: {len(sheet_data)} сообщений")
+                # Фильтруем: берём только сообщения нужных чатов
+                relevant = [m for m in sheet_data if str(m.get("chat_id", "")) in needed_chat_ids]
+                messages_data.extend(relevant)
+                print(f"   {sheet.title}: {len(relevant)}/{len(sheet_data)} сообщений (отфильтровано)")
             except Exception as e:
-                print(f"   ⚠️ Ошибка чтения {sheet.title}: {e}")
+                print(f"   Ошибка чтения {sheet.title}: {e}")
                 continue
 
-        print(f"   📊 Всего прочитано сообщений: {len(messages_data)}")
+        print(f"   Всего сообщений для анализа: {len(messages_data)}")
     except Exception as e:
         print(f"Ошибка чтения сообщений: {e}")
         return []
@@ -329,13 +393,11 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
         if chat_id:
             messages_by_chat.setdefault(chat_id, []).append(msg)
 
-    print(f"   📊 Чатов с сообщениями: {len(messages_by_chat)}")
-
     result = []
     skipped_no_id = 0
     skipped_few_msgs = 0
 
-    for chat in chats_data[:limit]:
+    for chat in recent_chats:
         chat_id = str(chat.get("chat_id", ""))
         if not chat_id:
             skipped_no_id += 1
@@ -354,9 +416,9 @@ def load_chats_from_sheets(ss, limit: int = 50) -> List[Dict[str, Any]]:
             "messages": messages
         })
 
-    print(f"   📊 Пропущено без chat_id: {skipped_no_id}")
-    print(f"   📊 Пропущено с < 2 сообщений: {skipped_few_msgs}")
-    print(f"   📊 Итого для анализа: {len(result)}")
+    print(f"   Пропущено без chat_id: {skipped_no_id}")
+    print(f"   Пропущено с < 2 сообщений: {skipped_few_msgs}")
+    print(f"   Итого чатов с сообщениями: {len(result)}")
 
     return result
 
@@ -430,15 +492,15 @@ def main():
         print("Инициализирую Groq...")
         groq = GroqClient(groq_key)
 
-        # Загружаем чаты
-        print("Загружаю чаты...")
-        chats = load_chats_from_sheets(ss, limit=200)
+        # Загружаем чаты за последние 7 дней
+        print("Загружаю чаты за последнюю неделю...")
+        chats = load_chats_from_sheets(ss, days_back=7)
         print(f"   Найдено чатов: {len(chats)}")
 
         analyzed = load_analyzed_chats(ss)
         print(f"   Уже проанализировано: {len(analyzed)}")
 
-        # Фильтруем: новые + изменённые + достаточно сообщений (>= 5)
+        # Фильтруем: новые + изменённые + достаточно сообщений (>= 4)
         chats_to_analyze = []
         skipped_few = 0
         for c in chats:
@@ -446,8 +508,8 @@ def main():
             msg_count = len(c["messages"])
             chat_status = c["chat"].get("status", "") or c["chat"].get("outcome", "")
 
-            # Пропускаем чаты с < 5 сообщениями ДО лимита
-            if msg_count < 5:
+            # Пропускаем чаты с < 4 сообщениями ДО лимита
+            if msg_count < 4:
                 skipped_few += 1
                 continue
 
@@ -461,7 +523,7 @@ def main():
         total_to_analyze = len(chats_to_analyze)
         new_count = sum(1 for c in chats_to_analyze if c["reanalysis_reason"] == "новый")
         updated_count = total_to_analyze - new_count
-        print(f"   Пропущено с < 5 сообщений: {skipped_few}")
+        print(f"   Пропущено с < 4 сообщений: {skipped_few}")
         print(f"   Всего для анализа: {total_to_analyze} (новых: {new_count}, обновлённых: {updated_count})")
 
         if not chats_to_analyze:
@@ -557,8 +619,9 @@ def main():
             rows = dicts_to_table(results, header=header)
             append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
 
-            # Уведомление об успехе через централизованную систему алертов
-            from shared.alerting import alert_success
+            # Уведомление об успехе + сводка по менеджерам
+            from shared.alerting import alert_success, send_telegram, ADMIN_ID
+            from collections import defaultdict
 
             unique_managers = len(set(r["manager_id"] for r in results if r["manager_id"]))
 
@@ -571,6 +634,39 @@ def main():
                     "Ошибок": errors
                 }
             )
+
+            # Сводка по каждому менеджеру
+            by_manager = defaultdict(list)
+            for r in results:
+                name = r.get("manager_name") or r.get("manager_id") or "Неизвестный"
+                by_manager[name].append(r)
+
+            skill_labels = {
+                "greeting_score": "Привет",
+                "needs_score": "Потреб",
+                "presentation_score": "Презент",
+                "objection_score": "Возраж",
+                "closing_score": "Закрыт",
+                "cross_sell_score": "Допрод",
+            }
+            skill_keys = list(skill_labels.keys())
+
+            lines = ["<b>Анализ чатов за сегодня</b>\n"]
+            for mgr_name, mgr_results in by_manager.items():
+                avgs = {}
+                for sk in skill_keys:
+                    vals = [float(r.get(sk, 0)) for r in mgr_results if r.get(sk)]
+                    avgs[sk] = round(sum(vals) / len(vals), 1) if vals else 0
+
+                overall_vals = [float(r.get("overall_score", 0)) for r in mgr_results if r.get("overall_score")]
+                overall = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else 0
+
+                lines.append(f"<b>{mgr_name}</b> ({len(mgr_results)} чатов, общ: {overall})")
+                scores_str = " | ".join(f"{skill_labels[sk]}: {avgs[sk]}" for sk in skill_keys)
+                lines.append(f"  {scores_str}")
+                lines.append("")
+
+            send_telegram(ADMIN_ID, "\n".join(lines))
             print("Готово!")
         else:
             msg = f"Академия INSTINTO: анализ завершён, но результатов нет"

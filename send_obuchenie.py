@@ -128,10 +128,6 @@ def main():
                 admin_summary.append(f"⚠️ {manager_name}: не зарегистрирован в боте")
                 print(f"   {manager_name}: не найден в users (нужна регистрация)")
 
-        # Сводка админу через @analiz_raboty_manager_bot
-        admin_summary.append(f"\nВсего отправлено: {modules_sent}")
-        alert_send(ADMIN_ID, "\n".join(admin_summary))
-
         print(f"\nОтправлено модулей обучения: {modules_sent}")
 
         alert_success(
