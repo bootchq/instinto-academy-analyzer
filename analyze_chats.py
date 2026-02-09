@@ -226,7 +226,7 @@ def smart_truncate_messages(messages: List[Dict[str, Any]], max_messages: int = 
 
 
 def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
-    """Парсит JSON из ответа LLM."""
+    """Парсит JSON из ответа LLM. Устойчив к обрезанным ответам."""
     import re
     text = response.strip()
     if text.startswith("```"):
@@ -234,15 +234,41 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines)
 
+    # Убираем trailing запятые перед } и ]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r'\{[\s\S]*\}', text)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        pass
+
+    # Извлекаем JSON блок
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        candidate = match.group()
+        candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Починка обрезанного JSON: добавляем недостающие скобки
+    match = re.search(r'\{[\s\S]*', text)
+    if match:
+        candidate = match.group().rstrip()
+        # Убираем trailing запятую и незавершённые строки
+        candidate = re.sub(r',\s*"[^"]*$', '', candidate)
+        candidate = re.sub(r',\s*$', '', candidate)
+        # Считаем незакрытые скобки
+        open_braces = candidate.count('{') - candidate.count('}')
+        open_brackets = candidate.count('[') - candidate.count(']')
+        candidate += ']' * max(0, open_brackets) + '}' * max(0, open_braces)
+        candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
     return None
 
 
