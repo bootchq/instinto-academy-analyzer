@@ -412,12 +412,18 @@ def main():
         analyzed = load_analyzed_chats(ss)
         print(f"   Уже проанализировано: {len(analyzed)}")
 
-        # Фильтруем: новые + изменённые
+        # Фильтруем: новые + изменённые + достаточно сообщений (>= 5)
         chats_to_analyze = []
+        skipped_few = 0
         for c in chats:
             chat_id = c["chat_id"]
             msg_count = len(c["messages"])
             chat_status = c["chat"].get("status", "") or c["chat"].get("outcome", "")
+
+            # Пропускаем чаты с < 5 сообщениями ДО лимита
+            if msg_count < 5:
+                skipped_few += 1
+                continue
 
             need, reason = needs_reanalysis(chat_id, msg_count, chat_status, analyzed)
             if need:
@@ -429,6 +435,7 @@ def main():
         total_to_analyze = len(chats_to_analyze)
         new_count = sum(1 for c in chats_to_analyze if c["reanalysis_reason"] == "новый")
         updated_count = total_to_analyze - new_count
+        print(f"   Пропущено с < 5 сообщений: {skipped_few}")
         print(f"   Всего для анализа: {total_to_analyze} (новых: {new_count}, обновлённых: {updated_count})")
 
         if not chats_to_analyze:
@@ -453,10 +460,6 @@ def main():
             print(f"\n[{i}/{len(chats_to_analyze)}] Анализирую чат {chat_id} ({reason})...")
 
             # Умная обрезка до 50 сообщений
-            if len(messages) < 5:
-                print(f"  Пропускаю — слишком мало сообщений ({len(messages)})")
-                continue
-
             truncated_messages = smart_truncate_messages(messages, max_messages=50)
             dialog_text = format_dialog(truncated_messages)
 
@@ -544,7 +547,12 @@ def main():
             )
             print("Готово!")
         else:
-            telegram.send("Академия INSTINTO: анализ завершён, но результатов нет (ошибки парсинга)")
+            msg = f"Академия INSTINTO: анализ завершён, но результатов нет"
+            if errors > 0:
+                msg += f" ({errors} ошибок парсинга LLM)"
+            else:
+                msg += " (нет чатов с достаточным количеством сообщений)"
+            telegram.send(msg)
             print("Нет результатов для записи")
 
     except Exception as e:
