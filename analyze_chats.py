@@ -28,8 +28,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from shared import time_utils
 
-# Лимит чатов за один запуск (при 60с паузе = 10 минут)
-MAX_CHATS_PER_RUN = 10
+# Лимит чатов за один запуск (переопределяется через env MAX_CHATS)
+MAX_CHATS_PER_RUN = int(os.environ.get("MAX_CHATS", "10"))
 
 import requests
 
