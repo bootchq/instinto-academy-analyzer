@@ -468,7 +468,7 @@ def main():
             prompt = ANALYSIS_PROMPT.format(dialog=dialog_text)
 
             try:
-                response = groq.chat(prompt)
+                response = groq.chat(prompt, max_tokens=4000)
                 # Логируем первые 200 символов для диагностики
                 print(f"  LLM ответ (начало): {response[:200]}...")
                 analysis = parse_llm_response(response)
