@@ -30,10 +30,6 @@ from shared.sheets_academy import open_spreadsheet
 from send_reports import load_analysis_data, aggregate_by_manager, build_user_mapping
 
 
-# ID админа для уведомлений
-ADMIN_CHAT_ID = "57186925"
-
-
 def format_learning_message(manager_name: str, weakest_skills: List[str]) -> str:
     """Форматирует короткое обучающее сообщение."""
     skill_names = [SKILL_NAMES.get(sk, sk) for sk in weakest_skills]
@@ -55,6 +51,8 @@ def format_learning_message(manager_name: str, weakest_skills: List[str]) -> str
 
 def main():
     """Основная функция."""
+    from shared.alerting import send_telegram as alert_send, ADMIN_ID, alert_success, alert_error
+
     telegram = TelegramNotifier(
         bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "")
     )
@@ -79,7 +77,7 @@ def main():
         print(f"   Найдено записей: {len(data)}")
 
         if not data:
-            telegram.send(ADMIN_CHAT_ID, "Еженедельное обучение: нет данных за последние 7 дней")
+            alert_send(ADMIN_ID, "Еженедельное обучение: нет данных за последние 7 дней")
             print("Нет данных для обучения")
             return
 
@@ -88,7 +86,7 @@ def main():
         print(f"   Менеджеров в данных: {len(managers)}")
 
         if not managers:
-            telegram.send(ADMIN_CHAT_ID, "Еженедельное обучение: нет данных по менеджерам")
+            alert_send(ADMIN_ID, "Еженедельное обучение: нет данных по менеджерам")
             return
 
         modules_sent = 0
@@ -130,14 +128,12 @@ def main():
                 admin_summary.append(f"⚠️ {manager_name}: не зарегистрирован в боте")
                 print(f"   {manager_name}: не найден в users (нужна регистрация)")
 
-        # Отправляем сводку админу
+        # Сводка админу через @analiz_raboty_manager_bot
         admin_summary.append(f"\nВсего отправлено: {modules_sent}")
-        telegram.send(ADMIN_CHAT_ID, "\n".join(admin_summary))
+        alert_send(ADMIN_ID, "\n".join(admin_summary))
 
         print(f"\nОтправлено модулей обучения: {modules_sent}")
 
-        # Уведомление об успехе через централизованную систему алертов
-        from shared.alerting import alert_success
         alert_success(
             service_name="send-weeks-obuchenie",
             message="Модули обучения отправлены",
@@ -148,8 +144,6 @@ def main():
         )
 
     except Exception as e:
-        # Уведомление об ошибке через централизованную систему алертов
-        from shared.alerting import alert_error
         alert_error(
             service_name="send-weeks-obuchenie",
             error=e,

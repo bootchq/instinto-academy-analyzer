@@ -32,10 +32,6 @@ from shared.sheets_academy import open_spreadsheet, get_all_users
 from shared import time_utils
 
 
-# ID админа для сводного отчёта
-ADMIN_CHAT_ID = "57186925"
-
-
 def load_analysis_data(ss, days: int = 7) -> List[Dict[str, Any]]:
     """
     Загружает данные анализа за последние N дней.
@@ -150,6 +146,8 @@ def build_user_mapping(ss) -> Dict[str, str]:
 
 def main():
     """Основная функция."""
+    from shared.alerting import send_telegram as alert_send, ADMIN_ID, alert_success, alert_error
+
     telegram = TelegramNotifier(
         bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", "")
     )
@@ -174,7 +172,7 @@ def main():
         print(f"   Найдено записей: {len(data)}")
 
         if not data:
-            telegram.send(ADMIN_CHAT_ID, "Еженедельный отчёт: нет данных за последние 7 дней")
+            alert_send(ADMIN_ID, "Еженедельный отчёт: нет данных за последние 7 дней")
             print("Нет данных для отчёта")
             return
 
@@ -183,7 +181,7 @@ def main():
         print(f"   Менеджеров в данных: {len(managers)}")
 
         if not managers:
-            telegram.send(ADMIN_CHAT_ID, "Еженедельный отчёт: нет данных по менеджерам")
+            alert_send(ADMIN_ID, "Еженедельный отчёт: нет данных по менеджерам")
             return
 
         reports_sent = 0
@@ -230,14 +228,12 @@ def main():
                 admin_summary.append(f"⚠️ {manager_name}: не зарегистрирован в боте")
                 print(f"   {manager_name}: не найден в users (нужна регистрация)")
 
-        # Отправляем сводку админу
+        # Сводка админу через @analiz_raboty_manager_bot
         admin_summary.append(f"\nВсего отправлено: {reports_sent}")
-        telegram.send(ADMIN_CHAT_ID, "\n".join(admin_summary))
+        alert_send(ADMIN_ID, "\n".join(admin_summary))
 
         print(f"\nОтправлено персональных отчётов: {reports_sent}")
 
-        # Уведомление об успехе через централизованную систему алертов
-        from shared.alerting import alert_success
         alert_success(
             service_name="send-weeks-reports",
             message="Еженедельные отчёты отправлены",
@@ -248,8 +244,6 @@ def main():
         )
 
     except Exception as e:
-        # Уведомление об ошибке через централизованную систему алертов
-        from shared.alerting import alert_error
         alert_error(
             service_name="send-weeks-reports",
             error=e,

@@ -8,16 +8,18 @@ from datetime import datetime, timezone
 from . import time_utils
 
 ADMIN_ID = 57186925
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# Для алертов используем отдельный токен (@analiz_raboty_manager_bot)
+# Если ALERT_BOT_TOKEN не задан — фоллбэк на TELEGRAM_BOT_TOKEN
+ALERT_BOT_TOKEN = os.environ.get("ALERT_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 
 
 def send_telegram(chat_id: int, text: str, parse_mode: str = "HTML"):
-    """Отправить сообщение в Telegram."""
-    if not TELEGRAM_BOT_TOKEN:
-        print(f"⚠️ TELEGRAM_BOT_TOKEN не установлен, пропускаю алерт")
+    """Отправить сообщение в Telegram через бот алертов."""
+    if not ALERT_BOT_TOKEN:
+        print(f"⚠️ ALERT_BOT_TOKEN не установлен, пропускаю алерт")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
     try:
         response = requests.post(url, json={
             "chat_id": chat_id,
