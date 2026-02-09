@@ -570,6 +570,8 @@ def main():
                     continue
 
                 scores = analysis.get("scores", {})
+                # ВАЖНО: оценки записываются как есть (5.2), но Google Sheets с европейской локалью
+                # хранит их как "5,2", а gspread парсит это как 52. При чтении нужно делить на 10.
                 result = {
                     "chat_id": chat_id,
                     "manager_id": chat.get("manager_id", ""),
