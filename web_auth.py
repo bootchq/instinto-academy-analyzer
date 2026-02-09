@@ -61,6 +61,21 @@ def run_migrations():
         cur.execute("ALTER TABLE web_access_requests ADD COLUMN IF NOT EXISTS phone VARCHAR(50)")
         # Удаляем тестового пользователя если есть
         cur.execute("DELETE FROM web_users WHERE login = 'test_user_123'")
+        # Таблица прогресса студентов
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS web_progress (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES web_users(id) ON DELETE CASCADE,
+                module_id INTEGER NOT NULL,
+                score INTEGER,
+                passed BOOLEAN DEFAULT FALSE,
+                time_spent_seconds INTEGER DEFAULT 0,
+                completed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, module_id)
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
@@ -341,6 +356,122 @@ def check_auth():
             "role": request.user["role"]
         }
     }), 200
+
+
+@app.route("/api/progress", methods=["POST"])
+@require_auth
+def save_progress():
+    """Сохраняет прогресс студента по модулю."""
+    data = request.get_json()
+    module_id = data.get("module_id")
+    score = data.get("score")
+    passed = data.get("passed", False)
+    time_spent = data.get("time_spent_seconds", 0)
+
+    if not isinstance(module_id, int) or module_id < 1 or module_id > 14:
+        return jsonify({"error": "Некорректный module_id"}), 400
+
+    user_id = request.user["user_id"]
+
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            INSERT INTO web_progress (user_id, module_id, score, passed, time_spent_seconds, completed_at)
+            VALUES (%s, %s, %s, %s, %s, CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END)
+            ON CONFLICT (user_id, module_id) DO UPDATE SET
+                score = GREATEST(web_progress.score, EXCLUDED.score),
+                passed = EXCLUDED.passed OR web_progress.passed,
+                time_spent_seconds = web_progress.time_spent_seconds + EXCLUDED.time_spent_seconds,
+                completed_at = CASE
+                    WHEN EXCLUDED.passed AND web_progress.completed_at IS NULL THEN CURRENT_TIMESTAMP
+                    ELSE web_progress.completed_at
+                END,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, module_id, score, passed, time_spent, passed))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logger.error(f"Ошибка сохранения прогресса: {e}")
+        return jsonify({"error": "Ошибка сервера"}), 500
+
+
+@app.route("/api/progress", methods=["GET"])
+@require_auth
+def get_progress():
+    """Возвращает прогресс текущего студента."""
+    user_id = request.user["user_id"]
+
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT module_id, score, passed, time_spent_seconds, completed_at FROM web_progress WHERE user_id = %s",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        progress = {}
+        for row in rows:
+            progress[row["module_id"]] = {
+                "score": row["score"],
+                "passed": row["passed"],
+                "time_spent_seconds": row["time_spent_seconds"],
+                "date": row["completed_at"].isoformat() if row["completed_at"] else None
+            }
+
+        return jsonify({"progress": progress}), 200
+    except Exception as e:
+        logger.error(f"Ошибка получения прогресса: {e}")
+        return jsonify({"error": "Ошибка сервера"}), 500
+
+
+@app.route("/api/admin/progress", methods=["GET"])
+@require_auth
+def get_admin_progress():
+    """Возвращает прогресс всех студентов (только для admin)."""
+    if request.user.get("role") != "admin":
+        return jsonify({"error": "Доступ запрещён"}), 403
+
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                wu.id,
+                wu.login,
+                wu.telegram_username,
+                war.phone,
+                tu.full_name,
+                COUNT(CASE WHEN wp.passed THEN 1 END) as modules_completed,
+                ROUND(AVG(CASE WHEN wp.passed THEN wp.score END)::numeric, 1) as avg_score,
+                COALESCE(SUM(wp.time_spent_seconds), 0) as total_time_seconds
+            FROM web_users wu
+            LEFT JOIN web_progress wp ON wu.id = wp.user_id
+            LEFT JOIN web_access_requests war
+                ON wu.telegram_username = war.telegram_username AND war.status = 'approved'
+            LEFT JOIN telegram_users tu ON wu.telegram_username = tu.username
+            WHERE wu.role = 'student'
+            GROUP BY wu.id, wu.login, wu.telegram_username, war.phone, tu.full_name
+            ORDER BY modules_completed DESC, avg_score DESC
+        """)
+
+        students = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return jsonify({"students": [dict(s) for s in students]}), 200
+    except Exception as e:
+        logger.error(f"Ошибка получения прогресса студентов: {e}")
+        return jsonify({"error": "Ошибка сервера"}), 500
 
 
 # === Функции для бота ===

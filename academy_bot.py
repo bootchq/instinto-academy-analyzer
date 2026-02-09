@@ -54,6 +54,10 @@ logger = logging.getLogger(__name__)
 # Супер-админ (может одобрять заявки)
 ADMIN_ID = 57186925
 
+# Список ID с доступом к /admin (админ + управляющий)
+MANAGER_IDS = set(map(int, filter(None, os.environ.get("MANAGER_IDS", "").split(","))))
+MANAGER_IDS.add(ADMIN_ID)
+
 # WebApp URL для профиля навыков
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "")
 
@@ -94,6 +98,7 @@ class AcademyBot:
         self.dp.message.register(self.cmd_modules, Command("modules"))
         self.dp.message.register(self.cmd_pending, Command("pending"))
         self.dp.message.register(self.cmd_profile, Command("profile"))
+        self.dp.message.register(self.cmd_admin, Command("admin"))
 
         # Callbacks: старая система (не используется, оставлено для совместимости)
         # self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
@@ -326,6 +331,85 @@ class AcademyBot:
             ])
 
             await message.answer(text, reply_markup=keyboard)
+
+    async def cmd_admin(self, message: Message):
+        """Показывает прогресс студентов (для админа и управляющего)."""
+        if message.from_user.id not in MANAGER_IDS:
+            await message.answer("Эта команда доступна только для администрации.")
+            return
+
+        from web_auth import get_db
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            cur.execute("""
+                SELECT
+                    wu.id,
+                    wu.login,
+                    wu.telegram_username,
+                    war.phone,
+                    tu.full_name,
+                    COUNT(CASE WHEN wp.passed THEN 1 END) as modules_completed,
+                    ROUND(AVG(CASE WHEN wp.passed THEN wp.score END)::numeric, 1) as avg_score,
+                    COALESCE(SUM(wp.time_spent_seconds), 0) as total_time_seconds
+                FROM web_users wu
+                LEFT JOIN web_progress wp ON wu.id = wp.user_id
+                LEFT JOIN web_access_requests war
+                    ON wu.telegram_username = war.telegram_username AND war.status = 'approved'
+                LEFT JOIN telegram_users tu ON wu.telegram_username = tu.username
+                WHERE wu.role = 'student'
+                GROUP BY wu.id, wu.login, wu.telegram_username, war.phone, tu.full_name
+                ORDER BY modules_completed DESC, avg_score DESC
+            """)
+
+            students = cur.fetchall()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка получения прогресса: {e}")
+            await message.answer("Ошибка получения данных.")
+            return
+
+        if not students:
+            await message.answer("Нет студентов.")
+            return
+
+        # Форматируем отчёт
+        lines = ["<b>Прогресс студентов Академии</b>\n"]
+
+        for s in students:
+            name = s["full_name"] or s["telegram_username"] or s["login"]
+            phone = s["phone"] or "—"
+            completed = s["modules_completed"] or 0
+            avg = s["avg_score"] if s["avg_score"] is not None else "—"
+            total_sec = s["total_time_seconds"] or 0
+
+            hours = total_sec // 3600
+            minutes = (total_sec % 3600) // 60
+            time_str = f"{hours}ч {minutes}м" if hours > 0 else (f"{minutes}м" if total_sec > 0 else "—")
+
+            bar = "\u2588" * completed + "\u2591" * (14 - completed)
+
+            lines.append(
+                f"<b>{name}</b>\n"
+                f"Тел: {phone}\n"
+                f"Модули: {completed}/14 [{bar}]\n"
+                f"Ср. балл: {avg}/10\n"
+                f"Время: {time_str}\n"
+            )
+
+        # Разбиваем на сообщения по 4000 символов
+        text = ""
+        for line in lines:
+            if len(text) + len(line) > 4000:
+                await message.answer(text)
+                text = ""
+            text += line
+
+        if text:
+            await message.answer(text)
 
     async def on_request_access(self, callback: CallbackQuery):
         """Обработчик запроса доступа — запрашиваем контакт."""
