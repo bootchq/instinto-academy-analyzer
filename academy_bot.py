@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -91,6 +91,28 @@ class AcademyBot:
         # Регистрируем handlers
         self._register_handlers()
 
+    def _get_menu_keyboard(self, user_id: int) -> ReplyKeyboardMarkup:
+        """Возвращает клавиатуру меню по роли пользователя."""
+        if user_id == ADMIN_ID:
+            return ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="Модули"), KeyboardButton(text="Прогресс")],
+                    [KeyboardButton(text="Заявки"), KeyboardButton(text="Управление доступом")]
+                ],
+                resize_keyboard=True
+            )
+        if user_id in MANAGER_IDS:
+            return ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="Модули"), KeyboardButton(text="Прогресс")]
+                ],
+                resize_keyboard=True
+            )
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Модули")]],
+            resize_keyboard=True
+        )
+
     def _register_handlers(self):
         """Регистрирует обработчики."""
         # Команды
@@ -100,14 +122,16 @@ class AcademyBot:
         self.dp.message.register(self.cmd_profile, Command("profile"))
         self.dp.message.register(self.cmd_admin, Command("admin"))
 
-        # Callbacks: старая система (не используется, оставлено для совместимости)
-        # self.dp.callback_query.register(self.on_request_access, F.data == "request_access")
-        # self.dp.callback_query.register(self.on_approve, F.data.startswith("approve:"))
-        # self.dp.callback_query.register(self.on_reject, F.data.startswith("reject:"))
+        # Кнопки меню (текстовые хендлеры)
+        self.dp.message.register(self.on_text_modules, F.text == "Модули")
+        self.dp.message.register(self.on_text_progress, F.text == "Прогресс")
+        self.dp.message.register(self.on_text_pending, F.text == "Заявки")
+        self.dp.message.register(self.on_text_manage_access, F.text == "Управление доступом")
 
         # Callbacks: веб-авторизация
         self.dp.callback_query.register(self.on_web_approve, F.data.startswith("web_approve:"))
         self.dp.callback_query.register(self.on_web_reject, F.data.startswith("web_reject:"))
+        self.dp.callback_query.register(self.on_revoke_access, F.data.startswith("revoke:"))
 
         # Callbacks: обучение
         self.dp.callback_query.register(self.on_module_start, F.data.startswith("module:"))
@@ -146,18 +170,10 @@ class AcademyBot:
 
         # Админ всегда имеет доступ
         if user_id == ADMIN_ID:
-            keyboard = None
-            if WEBAPP_URL:
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="Профиль навыков", web_app=WebAppInfo(url=WEBAPP_URL))
-                ]])
             await message.answer(
                 "Привет, админ! Ты управляешь Академией INSTINTO.\n\n"
-                "Команды:\n"
-                "/modules — список модулей обучения\n"
-                "/pending — заявки на рассмотрении\n"
-                "/profile — профиль навыков",
-                reply_markup=keyboard
+                "Используй кнопки меню внизу.",
+                reply_markup=self._get_menu_keyboard(user_id)
             )
             return
 
@@ -184,7 +200,7 @@ class AcademyBot:
                     f"С возвращением!\n\n"
                     f"Ваш логин: <code>{web_user['login']}</code>\n"
                     f"Сайт: https://academy-modules.vercel.app",
-                    reply_markup=ReplyKeyboardRemove()
+                    reply_markup=self._get_menu_keyboard(user_id)
                 )
                 return
 
@@ -404,6 +420,111 @@ class AcademyBot:
 
         if text:
             await message.answer(text)
+
+    # --- Текстовые хендлеры для кнопок меню ---
+
+    async def on_text_modules(self, message: Message):
+        """Кнопка 'Модули'."""
+        await self.cmd_modules(message)
+
+    async def on_text_progress(self, message: Message):
+        """Кнопка 'Прогресс'."""
+        await self.cmd_admin(message)
+
+    async def on_text_pending(self, message: Message):
+        """Кнопка 'Заявки'."""
+        await self.cmd_pending(message)
+
+    async def on_text_manage_access(self, message: Message):
+        """Кнопка 'Управление доступом' — список пользователей с возможностью удалить."""
+        if message.from_user.id != ADMIN_ID:
+            return
+
+        from web_auth import get_db
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT wu.id, wu.login, wu.telegram_username, tu.full_name, war.phone
+                FROM web_users wu
+                LEFT JOIN telegram_users tu ON wu.telegram_username = tu.username
+                LEFT JOIN web_access_requests war
+                    ON wu.telegram_username = war.telegram_username AND war.status = 'approved'
+                WHERE wu.role = 'student'
+                ORDER BY wu.login
+            """)
+            users = cur.fetchall()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка получения пользователей: {e}")
+            await message.answer("Ошибка получения данных.")
+            return
+
+        if not users:
+            await message.answer("Нет пользователей с доступом.")
+            return
+
+        await message.answer(f"<b>Пользователи с доступом ({len(users)})</b>\n\nНажмите кнопку чтобы удалить доступ:")
+
+        for u in users:
+            name = u["full_name"] or u["telegram_username"] or u["login"]
+            phone = u["phone"] or "—"
+            text = f"<b>{name}</b>\nЛогин: {u['login']}\nТел: {phone}"
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Удалить доступ", callback_data=f"revoke:{u['id']}")
+            ]])
+            await message.answer(text, reply_markup=keyboard)
+
+    async def on_revoke_access(self, callback: CallbackQuery):
+        """Удаление доступа пользователя."""
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Только админ может удалять доступ", show_alert=True)
+            return
+
+        await callback.answer()
+        user_id = int(callback.data.split(":")[1])
+
+        from web_auth import get_db
+
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+
+            # Получаем данные перед удалением
+            cur.execute("SELECT login, telegram_username FROM web_users WHERE id = %s", (user_id,))
+            user = cur.fetchone()
+
+            if not user:
+                await callback.message.edit_text(callback.message.text + "\n\nПользователь не найден")
+                cur.close()
+                conn.close()
+                return
+
+            # Удаляем (CASCADE удалит web_progress)
+            cur.execute("DELETE FROM web_users WHERE id = %s", (user_id,))
+
+            # Обновляем статус заявки
+            if user["telegram_username"]:
+                cur.execute(
+                    "UPDATE web_access_requests SET status = 'revoked' WHERE telegram_username = %s AND status = 'approved'",
+                    (user["telegram_username"],)
+                )
+
+            conn.commit()
+            cur.close()
+            conn.close()
+
+            await callback.message.edit_text(
+                callback.message.text + "\n\nДоступ удалён"
+            )
+            logger.info(f"Удалён доступ: {user['login']} (@{user['telegram_username']})")
+
+        except Exception as e:
+            logger.error(f"Ошибка удаления доступа: {e}")
+            await callback.message.answer("Ошибка при удалении доступа.")
 
     async def on_request_access(self, callback: CallbackQuery):
         """Обработчик запроса доступа — запрашиваем контакт."""
@@ -893,6 +1014,13 @@ class AcademyBot:
 
         # Удаляем webhook если был и сбрасываем старые апдейты
         await self.bot.delete_webhook(drop_pending_updates=True)
+
+        # Устанавливаем команды меню
+        await self.bot.set_my_commands([
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="modules", description="Модули обучения"),
+            BotCommand(command="admin", description="Прогресс студентов"),
+        ])
         logger.info("Telegram бот запущен")
 
         # Уведомление об успешном запуске через централизованную систему алертов
