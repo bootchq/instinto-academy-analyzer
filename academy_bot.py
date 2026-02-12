@@ -104,7 +104,8 @@ class AcademyBot:
         if user_id in MANAGER_IDS:
             return ReplyKeyboardMarkup(
                 keyboard=[
-                    [KeyboardButton(text="Модули"), KeyboardButton(text="Прогресс")]
+                    [KeyboardButton(text="Модули"), KeyboardButton(text="Прогресс")],
+                    [KeyboardButton(text="Управление доступом")]
                 ],
                 resize_keyboard=True
             )
@@ -437,7 +438,7 @@ class AcademyBot:
 
     async def on_text_manage_access(self, message: Message):
         """Кнопка 'Управление доступом' — список пользователей с возможностью удалить."""
-        if message.from_user.id != ADMIN_ID:
+        if message.from_user.id not in MANAGER_IDS:
             return
 
         from web_auth import get_db
@@ -480,8 +481,8 @@ class AcademyBot:
 
     async def on_revoke_access(self, callback: CallbackQuery):
         """Удаление доступа пользователя."""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("Только админ может удалять доступ", show_alert=True)
+        if callback.from_user.id not in MANAGER_IDS:
+            await callback.answer("Нет доступа", show_alert=True)
             return
 
         await callback.answer()
