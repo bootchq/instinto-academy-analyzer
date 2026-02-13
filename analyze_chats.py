@@ -500,13 +500,22 @@ def main():
         analyzed = load_analyzed_chats(ss)
         print(f"   Уже проанализировано: {len(analyzed)}")
 
-        # Маппинг manager_id → name из чатов, где имя известно
+        # Маппинг manager_id → name напрямую из chats_raw (обход expected_headers)
         manager_map = {}
-        for c in chats:
-            mid = str(c["chat"].get("manager_id", "")).strip()
-            mname = str(c["chat"].get("manager_name", "")).strip()
-            if mid and mname:
-                manager_map[mid] = mname
+        try:
+            raw_vals = ss.worksheet("chats_raw").get_all_values()
+            raw_hdr = raw_vals[0]
+            if "manager_id" in raw_hdr and "manager_name" in raw_hdr:
+                mi = raw_hdr.index("manager_id")
+                mn = raw_hdr.index("manager_name")
+                for row in raw_vals[1:]:
+                    if len(row) > max(mi, mn):
+                        rid = row[mi].strip()
+                        rname = row[mn].strip()
+                        if rid and rname and rid != rname:
+                            manager_map[rid] = rname
+        except Exception as e:
+            print(f"   Ошибка чтения маппинга менеджеров: {e}")
         if manager_map:
             print(f"   Маппинг менеджеров: {manager_map}")
 
