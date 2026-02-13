@@ -146,7 +146,7 @@ def append_to_worksheet(
             ws.spreadsheet.values_batch_update(body)
         else:
             # Для малых объёмов используем обычный update
-            ws.update(values=list(rows), range_name=f"A{next_row}")
+            ws.update(values=list(rows), range_name=f"A{next_row}", value_input_option="RAW")
 
 
 def get_existing_chat_ids(ss: gspread.Spreadsheet, worksheet_name: str = "chats_raw") -> set:

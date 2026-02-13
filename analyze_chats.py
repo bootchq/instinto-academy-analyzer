@@ -500,6 +500,16 @@ def main():
         analyzed = load_analyzed_chats(ss)
         print(f"   Уже проанализировано: {len(analyzed)}")
 
+        # Маппинг manager_id → name из чатов, где имя известно
+        manager_map = {}
+        for c in chats:
+            mid = str(c["chat"].get("manager_id", "")).strip()
+            mname = str(c["chat"].get("manager_name", "")).strip()
+            if mid and mname:
+                manager_map[mid] = mname
+        if manager_map:
+            print(f"   Маппинг менеджеров: {manager_map}")
+
         # Фильтруем: новые + изменённые + достаточно сообщений (>= 4)
         chats_to_analyze = []
         skipped_few = 0
@@ -570,12 +580,21 @@ def main():
                     continue
 
                 scores = analysis.get("scores", {})
-                # ВАЖНО: оценки записываются как есть (5.2), но Google Sheets с европейской локалью
-                # хранит их как "5,2", а gspread парсит это как 52. При чтении нужно делить на 10.
+                # Определяем менеджера: сначала из чата, потом из исходящих сообщений
+                mgr_id = str(chat.get("manager_id", "")).strip()
+                mgr_name = str(chat.get("manager_name", "")).strip()
+                if not mgr_id:
+                    for m in messages:
+                        if m.get("direction") == "out" and str(m.get("manager_id", "")).strip():
+                            mgr_id = str(m["manager_id"]).strip()
+                            break
+                if mgr_id and not mgr_name:
+                    mgr_name = manager_map.get(mgr_id, mgr_id)
+
                 result = {
                     "chat_id": chat_id,
-                    "manager_id": chat.get("manager_id", ""),
-                    "manager_name": chat.get("manager_name", ""),
+                    "manager_id": mgr_id,
+                    "manager_name": mgr_name,
                     "channel": chat.get("channel", ""),
                     "message_count": item["message_count"],
                     "chat_status": item["chat_status"],
