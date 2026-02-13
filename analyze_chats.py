@@ -644,12 +644,11 @@ def main():
             for mgr_name, mgr_results in sorted(by_manager.items(), key=lambda x: -len(x[1])):
                 avgs = {}
                 for sk in skill_keys:
-                    # Делим на 10 т.к. хранится как 52 вместо 5.2
-                    vals = [float(r.get(sk, 0)) / 10 for r in mgr_results if r.get(sk) and float(r.get(sk, 0)) > 0]
+                    # results в памяти — оценки уже в шкале 0-10 (НЕ делим на 10, это не из Sheets)
+                    vals = [float(r.get(sk, 0)) for r in mgr_results if r.get(sk) and float(r.get(sk, 0)) > 0]
                     avgs[sk] = round(sum(vals) / len(vals), 1) if vals else 0
 
-                # Делим на 10 для overall_score
-                overall_vals = [float(r.get("overall_score", 0)) / 10 for r in mgr_results if r.get("overall_score") and float(r.get("overall_score", 0)) > 10]
+                overall_vals = [float(r.get("overall_score", 0)) for r in mgr_results if r.get("overall_score") and float(r.get("overall_score", 0)) > 0]
                 overall = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else 0
 
                 lines.append(f"<b>{mgr_name}</b>: {len(mgr_results)} чатов, общая {overall}/10")
