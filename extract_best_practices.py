@@ -578,14 +578,14 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
 
         print(f"  [{i}/{len(to_analyze)}] Анализирую чат {cid} ({len(msgs)} сообщений)...")
 
-        truncated = smart_truncate(msgs, max_messages=50)
+        truncated = smart_truncate(msgs, max_messages=30)
         dialog_text = format_dialog(truncated)
 
-        if len(dialog_text) > 12000:
-            dialog_text = dialog_text[:12000] + "\n[...обрезано...]"
+        if len(dialog_text) > 5000:
+            dialog_text = dialog_text[:5000] + "\n[...обрезано...]"
 
         try:
-            response = groq.chat(ANALYSIS_PROMPT.format(dialog=dialog_text), max_tokens=4000)
+            response = groq.chat(ANALYSIS_PROMPT.format(dialog=dialog_text), max_tokens=1500)
             analysis = parse_llm_response(response)
 
             if not analysis:
