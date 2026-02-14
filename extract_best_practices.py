@@ -155,82 +155,122 @@ DEEP_ANALYSIS_PROMPT = """Ты тренер по продажам бренда I
 # === Groq клиент (копия из analyze_chats.py) ===
 
 class LLMClient:
-    """Универсальный клиент для OpenAI-совместимых API (Groq, Cerebras и др.)."""
+    """Мультипровайдерный LLM клиент с автофоллбэком.
+
+    Cerebras (основной) -> Groq (фоллбэк).
+    При rate limit одного провайдера автоматически переключается на другого.
+    """
 
     PROVIDERS = {
-        "groq": {
-            "url": "https://api.groq.com/openai/v1/chat/completions",
-            "model": "llama-3.1-8b-instant",
-            "env_key": "GROQ_API_KEY",
-        },
         "cerebras": {
             "url": "https://api.cerebras.ai/v1/chat/completions",
             "model": "llama-3.3-70b",
             "env_key": "CEREBRAS_API_KEY",
+            "pause": 2,  # 30 RPM
+        },
+        "groq": {
+            "url": "https://api.groq.com/openai/v1/chat/completions",
+            "model": "llama-3.1-8b-instant",
+            "env_key": "GROQ_API_KEY",
+            "pause": 10,  # 6K TPM — медленнее
         },
     }
 
-    def __init__(self, provider: str = "groq", api_key: str = "", model: str = ""):
-        cfg = self.PROVIDERS.get(provider, self.PROVIDERS["groq"])
-        self.provider = provider
-        self.base_url = cfg["url"]
-        self.model = model or cfg["model"]
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        })
-        self._stats = {"ok": 0, "rate_limited": 0, "total_wait": 0.0}
-        self._next_wait = 2.0
-        print(f"  LLM: {provider} / {self.model}")
+    def __init__(self):
+        # Инициализируем все доступные провайдеры
+        self._clients: Dict[str, dict] = {}
+        self._order: List[str] = []  # порядок приоритета
+        for name in ["cerebras", "groq"]:
+            cfg = self.PROVIDERS[name]
+            api_key = os.environ.get(cfg["env_key"], "")
+            if api_key:
+                sess = requests.Session()
+                sess.headers.update({
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                })
+                self._clients[name] = {
+                    "session": sess,
+                    "url": cfg["url"],
+                    "model": cfg["model"],
+                    "pause": cfg["pause"],
+                    "stats": {"ok": 0, "rate_limited": 0, "total_wait": 0.0},
+                    "blocked_until": 0.0,  # timestamp когда снимается блокировка
+                }
+                self._order.append(name)
+                print(f"  LLM провайдер: {name} / {cfg['model']}")
+
+        if not self._clients:
+            raise ValueError("Нет ни одного LLM API ключа (CEREBRAS_API_KEY / GROQ_API_KEY)")
+
+        self._current = self._order[0]
 
     @property
     def adaptive_pause(self) -> float:
-        return self._next_wait
+        """Пауза для текущего активного провайдера."""
+        return self._clients[self._current]["pause"]
+
+    def _pick_provider(self) -> Optional[str]:
+        """Выбрать доступного провайдера (не заблокированного rate limit)."""
+        now = time.time()
+        for name in self._order:
+            if self._clients[name]["blocked_until"] <= now:
+                return name
+        # Все заблокированы — берём того, кто разблокируется раньше
+        earliest = min(self._order, key=lambda n: self._clients[n]["blocked_until"])
+        wait = self._clients[earliest]["blocked_until"] - now
+        if wait > 0:
+            print(f"  Все провайдеры заблокированы, жду {wait:.0f}с ({earliest})...")
+            time.sleep(wait)
+        return earliest
 
     def chat(self, prompt: str, max_tokens: int = 1500) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.3,
-        }
-        for attempt in range(5):
+        last_error = None
+        for attempt in range(8):  # больше попыток — можем переключаться
+            provider = self._pick_provider()
+            if not provider:
+                break
+            self._current = provider
+            client = self._clients[provider]
+
+            payload = {
+                "model": client["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3,
+            }
             try:
-                resp = self.session.post(self.base_url, json=payload, timeout=120)
+                resp = client["session"].post(client["url"], json=payload, timeout=120)
                 if resp.status_code == 429:
                     retry_after = resp.headers.get("retry-after")
                     if retry_after:
-                        wait = min(float(retry_after) + 1, 120)
+                        block_sec = min(float(retry_after) + 2, 300)
                     else:
-                        wait = 30 * (attempt + 1)
-                    self._stats["rate_limited"] += 1
-                    self._stats["total_wait"] += wait
-                    print(f"  Rate limit, жду {wait:.0f}с (попытка {attempt + 1}/5)...")
-                    time.sleep(wait)
-                    continue
+                        block_sec = 60
+                    client["blocked_until"] = time.time() + block_sec
+                    client["stats"]["rate_limited"] += 1
+                    client["stats"]["total_wait"] += block_sec
+                    print(f"  {provider}: rate limit, блокирую на {block_sec:.0f}с -> переключаюсь")
+                    continue  # следующая итерация выберет другого провайдера
                 resp.raise_for_status()
-                self._stats["ok"] += 1
-                # Пауза на основе remaining токенов (если заголовок есть)
-                remaining = resp.headers.get("x-ratelimit-remaining-tokens")
-                if remaining and int(remaining) < 5000:
-                    self._next_wait = 5.0
-                else:
-                    self._next_wait = 2.0
+                client["stats"]["ok"] += 1
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.exceptions.RequestException as e:
-                if attempt < 4:
-                    time.sleep(10 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"LLM API error ({self.provider}): {e}")
-        raise RuntimeError(f"LLM API ({self.provider}): превышено число попыток")
+                last_error = e
+                # Блокируем ненадолго при ошибке сети
+                client["blocked_until"] = time.time() + 15
+                print(f"  {provider}: ошибка {e}, переключаюсь...")
+                continue
+
+        raise RuntimeError(f"LLM: все провайдеры недоступны. Последняя ошибка: {last_error}")
 
     def print_stats(self):
-        s = self._stats
-        total = s["ok"] + s["rate_limited"]
-        if total:
-            print(f"  LLM stats ({self.provider}): {s['ok']} OK, {s['rate_limited']} rate-limited, "
-                  f"потеряно на ожидании: {s['total_wait']:.0f}с")
+        for name, client in self._clients.items():
+            s = client["stats"]
+            total = s["ok"] + s["rate_limited"]
+            if total:
+                print(f"  LLM stats ({name}): {s['ok']} OK, {s['rate_limited']} rate-limited, "
+                      f"ожидание: {s['total_wait']:.0f}с")
 
 
 # === Утилиты ===
@@ -925,24 +965,13 @@ def main():
     print(f"              batch_size={BATCH_SIZE}, pause={PAUSE_SEC}с\n")
 
     try:
-        # Выбор LLM провайдера: cerebras (по умолчанию), groq
-        provider = os.environ.get("LLM_PROVIDER", "cerebras")
-        provider_cfg = LLMClient.PROVIDERS.get(provider, LLMClient.PROVIDERS["cerebras"])
-        api_key = os.environ.get(provider_cfg["env_key"])
-        if not api_key:
-            # Фоллбэк на Groq если Cerebras ключа нет
-            provider = "groq"
-            api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError(f"Нет API ключа для {provider}")
-
         sheets_id = os.environ.get("GOOGLE_SHEETS_ID")
         sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
         if not sheets_id or not sa_json:
             raise ValueError("GOOGLE_SHEETS_ID или GOOGLE_SERVICE_ACCOUNT_JSON не заданы")
 
         ss = open_spreadsheet(spreadsheet_id=sheets_id, service_account_json_path=sa_json)
-        groq = LLMClient(provider=provider, api_key=api_key)
+        groq = LLMClient()  # мультипровайдер: cerebras -> groq автофоллбэк
 
         # Фаза 1: Скрининг
         candidates = phase1_screening(ss)
