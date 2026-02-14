@@ -165,6 +165,15 @@ class GroqClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         })
+        # Адаптивная пауза: растёт при rate limit, снижается при успехах
+        self._pause = float(os.environ.get("BP_PAUSE_SEC", "3"))
+        self._min_pause = 2.0
+        self._max_pause = 15.0
+        self._successes_since_limit = 0
+
+    @property
+    def adaptive_pause(self) -> float:
+        return self._pause
 
     def chat(self, prompt: str, max_tokens: int = 4000) -> str:
         payload = {
@@ -177,11 +186,25 @@ class GroqClient:
             try:
                 resp = self.session.post(self.BASE_URL, json=payload, timeout=90)
                 if resp.status_code == 429:
-                    wait = 60 * (2 ** attempt)
-                    print(f"  Rate limit, жду {wait}с (попытка {attempt + 1}/5)...")
+                    # Читаем retry-after из заголовка если есть
+                    retry_after = resp.headers.get("retry-after")
+                    if retry_after:
+                        wait = min(float(retry_after) + 1, 120)
+                    else:
+                        wait = 30 * (attempt + 1)
+                    # Увеличиваем адаптивную паузу
+                    self._pause = min(self._pause * 1.5, self._max_pause)
+                    self._successes_since_limit = 0
+                    print(f"  Rate limit, жду {wait:.0f}с (попытка {attempt + 1}/5, пауза→{self._pause:.1f}с)...")
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
+                # Успех — постепенно снижаем паузу
+                self._successes_since_limit += 1
+                if self._successes_since_limit >= 10 and self._pause > self._min_pause:
+                    self._pause = max(self._pause * 0.85, self._min_pause)
+                    self._successes_since_limit = 0
+                    print(f"    (пауза снижена→{self._pause:.1f}с)")
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.exceptions.RequestException as e:
                 if attempt < 4:
@@ -552,7 +575,7 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
                 _save_batch(ss, batch_results, header)
                 batch_results = []
 
-            time.sleep(PAUSE_SEC)
+            time.sleep(groq.adaptive_pause)
 
         except Exception as e:
             print(f"    Ошибка: {e}")
@@ -733,7 +756,7 @@ def phase3_deep_analysis(ss, groq: GroqClient, all_results: List[Dict[str, Any]]
                 append_to_worksheet(ss, "best_practices_deep", rows=rows, header=deep_header)
                 print(f"    Сохранено {len(deep_results)} результатов")
 
-            time.sleep(PAUSE_SEC)
+            time.sleep(groq.adaptive_pause)
 
         except Exception as e:
             print(f"    Ошибка: {e}")
