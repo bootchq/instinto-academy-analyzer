@@ -292,8 +292,14 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
         print("chats_raw пуст!")
         return []
 
+    # Показываем ВСЕ листы в документе
+    all_sheets = ss.worksheets()
+    print(f"  Все листы в документе ({len(all_sheets)}):")
+    for s in all_sheets:
+        print(f"    {s.title} ({s.row_count} rows)")
+
     # Читаем ВСЕ данные (не tail)
-    print("Читаю ВСЕ чаты из chats_raw...")
+    print("\nЧитаю ВСЕ чаты из chats_raw...")
     all_values = chats_ws.get_all_values()
     print(f"  Всего строк: {len(all_values) - 1}")
 
@@ -384,13 +390,13 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
     return candidates
 
 
-# === Фаза 2: LLM анализ ===
+# === Фаза 2: Сбор оценок ===
 
 def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Анализирует кандидатов через LLM. Переиспользует scores из analysis_raw."""
-    print(f"\n=== ФАЗА 2: LLM анализ ({len(candidates)} кандидатов) ===\n")
+    """Собирает все оценки: из analysis_raw + новый LLM анализ для чатов с сообщениями."""
+    print(f"\n=== ФАЗА 2: Сбор оценок ({len(candidates)} кандидатов) ===\n")
 
-    # Читаем существующие результаты из analysis_raw
+    # === Шаг 1: Берём ВСЕ оценки из analysis_raw (главный источник) ===
     existing_scores: Dict[str, Dict] = {}
     try:
         ws = ss.worksheet("analysis_raw")
@@ -400,61 +406,44 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
             overall = _safe_float(row.get("overall_score", 0))
             if cid and overall > 0:
                 existing_scores[cid] = row
-        print(f"  Существующих оценок в analysis_raw: {len(existing_scores)}")
+        print(f"  Всего оценок в analysis_raw: {len(existing_scores)}")
     except Exception as e:
         print(f"  Не удалось прочитать analysis_raw: {e}")
 
-    # Читаем уже обработанные в best_practices_analysis (для resume)
-    already_done: set = set()
-    try:
-        ws = ss.worksheet("best_practices_analysis")
-        vals = ws.get_all_values()
-        if len(vals) > 1:
-            hdr = vals[0]
-            cid_idx = hdr.index("chat_id") if "chat_id" in hdr else 0
-            for row in vals[1:]:
-                if cid_idx < len(row) and row[cid_idx]:
-                    already_done.add(row[cid_idx].strip())
-        print(f"  Уже обработано в best_practices_analysis: {len(already_done)}")
-    except Exception:
-        pass
-
-    # Разделяем: уже оценённые vs нужно анализировать
+    # Конвертируем ВСЕ оценки из analysis_raw в результаты
     results = []
-    to_analyze = []
+    candidate_ids = {str(c.get("chat_id", "")) for c in candidates}
+    # Берём данные из chats_raw для обогащения
+    chats_by_id = {str(c.get("chat_id", "")): c for c in candidates}
 
-    for cand in candidates:
-        cid = str(cand.get("chat_id", ""))
+    for cid, existing in existing_scores.items():
+        cand = chats_by_id.get(cid, {})
+        results.append({
+            "chat_id": cid,
+            "manager_name": existing.get("manager_name", ""),
+            "channel": existing.get("channel", ""),
+            "created_at": cand.get("created_at", ""),
+            "message_count": int(existing.get("message_count", 0) or 0),
+            "has_order": cand.get("has_order", ""),
+            "is_successful": cand.get("is_successful", ""),
+            "overall_score": _safe_float(existing.get("overall_score", 0)),
+            "greeting_score": _safe_float(existing.get("greeting_score", 0)),
+            "needs_score": _safe_float(existing.get("needs_score", 0)),
+            "presentation_score": _safe_float(existing.get("presentation_score", 0)),
+            "objection_score": _safe_float(existing.get("objection_score", 0)),
+            "closing_score": _safe_float(existing.get("closing_score", 0)),
+            "cross_sell_score": _safe_float(existing.get("cross_sell_score", 0)),
+            "customer_segment": existing.get("customer_segment", ""),
+            "summary": existing.get("summary", ""),
+            "techniques": existing.get("techniques", ""),
+            "source": "analysis_raw",
+        })
 
-        # Если уже в best_practices_analysis — пропускаем
-        if cid in already_done:
-            continue
+    print(f"  Взято из analysis_raw: {len(results)}")
 
-        # Если есть оценка в analysis_raw — берём её
-        if cid in existing_scores:
-            existing = existing_scores[cid]
-            results.append({
-                "chat_id": cid,
-                "manager_name": existing.get("manager_name", cand.get("manager_name", "")),
-                "channel": existing.get("channel", cand.get("channel", "")),
-                "created_at": cand.get("created_at", ""),
-                "message_count": int(existing.get("message_count", 0) or cand.get("_total_msgs", 0)),
-                "has_order": cand.get("has_order", ""),
-                "is_successful": cand.get("is_successful", ""),
-                "overall_score": _safe_float(existing.get("overall_score", 0)),
-                "greeting_score": _safe_float(existing.get("greeting_score", 0)),
-                "needs_score": _safe_float(existing.get("needs_score", 0)),
-                "presentation_score": _safe_float(existing.get("presentation_score", 0)),
-                "objection_score": _safe_float(existing.get("objection_score", 0)),
-                "closing_score": _safe_float(existing.get("closing_score", 0)),
-                "cross_sell_score": _safe_float(existing.get("cross_sell_score", 0)),
-                "customer_segment": existing.get("customer_segment", ""),
-                "summary": existing.get("summary", ""),
-                "techniques": existing.get("techniques", ""),
-                "source": "analysis_raw",
-            })
-        else:
-            to_analyze.append(cand)
+    # === Шаг 2: Для кандидатов БЕЗ оценки — пробуем LLM анализ ===
+    to_analyze = [c for c in candidates if str(c.get("chat_id", "")) not in existing_scores]
+    print(f"  Кандидатов без оценки: {len(to_analyze)}")
 
     print(f"  Переиспользовано из analysis_raw: {len(results)}")
     print(f"  Нужно проанализировать: {len(to_analyze)}")
@@ -562,7 +551,8 @@ def _load_messages_for_chats(ss, chat_ids: set) -> Dict[str, List[Dict]]:
     messages_header = ["chat_id", "message_id", "sent_at", "direction", "manager_id", "text"]
 
     all_sheets = ss.worksheets()
-    msg_sheets = [s for s in all_sheets if s.title.startswith("messages_") and s.title != "messages_raw"]
+    # Включаем ВСЕ листы с сообщениями (включая messages_raw)
+    msg_sheets = [s for s in all_sheets if s.title.startswith("messages_")]
 
     if not msg_sheets:
         print("  Нет листов messages_YYYY_MM!")
