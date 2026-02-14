@@ -319,9 +319,18 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
         managers[name] += 1
     print(f"  Менеджеры: {dict(managers)}")
 
+    # Диагностика: показать первые 3 строки для понимания данных
+    print(f"\n  Диагностика (первые 3 чата):")
+    for c in all_chats[:3]:
+        print(f"    chat_id={c.get('chat_id','?')}, has_order='{c.get('has_order','')}', "
+              f"is_successful='{c.get('is_successful','')}', "
+              f"outbound='{c.get('outbound_count','')}', inbound='{c.get('inbound_count','')}', "
+              f"manager='{c.get('manager_name','')}'")
+
     # Фильтрация кандидатов
+    # outbound_count может быть пустым для старых чатов — НЕ фильтруем по нему жёстко
     candidates = []
-    stats = {"no_outbound": 0, "few_messages": 0, "no_order": 0, "passed": 0}
+    stats = {"no_manager": 0, "passed": 0, "with_order": 0, "successful": 0}
 
     for chat in all_chats:
         outbound = int(chat.get("outbound_count", 0) or 0)
@@ -329,33 +338,39 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
         total_msgs = inbound + outbound
         has_order = str(chat.get("has_order", "")).lower() in ("true", "1", "да", "yes")
         is_successful = str(chat.get("is_successful", "")).lower() in ("true", "1", "да", "yes")
+        mgr = chat.get("manager_name", "").strip() or chat.get("manager_id", "").strip()
 
-        if outbound < MIN_OUTBOUND:
-            stats["no_outbound"] += 1
-            continue
-        if total_msgs < MIN_MESSAGES:
-            stats["few_messages"] += 1
+        # Единственный жёсткий фильтр: должен быть менеджер
+        if not mgr or mgr == "Неизвестный":
+            stats["no_manager"] += 1
             continue
 
-        # Приоритет: чаты с заказом и успешным исходом
+        # Приоритет: чаты с заказом и успешным исходом получают высший балл
         priority = 0
         if has_order:
-            priority += 2
-        if is_successful:
             priority += 3
+            stats["with_order"] += 1
+        if is_successful:
+            priority += 4
+            stats["successful"] += 1
         # Больше сообщений = более содержательный диалог
-        priority += min(total_msgs / 10, 3)
+        if total_msgs > 0:
+            priority += min(total_msgs / 10, 3)
+        # Если outbound > 0 — бонус (значит метрики посчитаны)
+        if outbound > 0:
+            priority += 1
 
         candidates.append({
             **chat,
             "_priority": priority,
-            "_total_msgs": total_msgs,
+            "_total_msgs": total_msgs if total_msgs > 0 else None,  # None = посчитаем позже
         })
         stats["passed"] += 1
 
     print(f"\n  Результат скрининга:")
-    print(f"    Мало ответов менеджера (<{MIN_OUTBOUND}): {stats['no_outbound']}")
-    print(f"    Мало сообщений (<{MIN_MESSAGES}): {stats['few_messages']}")
+    print(f"    Без менеджера: {stats['no_manager']}")
+    print(f"    С заказом: {stats['with_order']}")
+    print(f"    Успешных: {stats['successful']}")
     print(f"    Прошли фильтр: {stats['passed']}")
 
     # Сортируем по приоритету (лучшие первые)
