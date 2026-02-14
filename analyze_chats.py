@@ -413,7 +413,7 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]]
             print("   chats_raw: нет данных в хвосте")
             return [], {}
 
-        print(f"   Прочитано {len(tail_data)} строк из chats_raw (хвост, строки {start_row}-{total_rows})")
+        print(f"   Прочитано {len(tail_data)} строк из chats_raw (хвост, строки {start_row}-{filled_rows})")
 
         # Конвертируем в list of dicts
         chats_data = []
