@@ -166,8 +166,8 @@ def get_existing_chat_ids(ss: gspread.Spreadsheet, worksheet_name: str = "chats_
                 existing_ids.add(str(row[chat_id_idx]).strip())
         return existing_ids
     except Exception as e:
-        print(f"⚠️ Ошибка при чтении существующих чатов: {e}")
-        return set()
+        print(f"🔴 КРИТИЧЕСКАЯ ошибка чтения существующих чатов: {e}")
+        raise  # НЕ возвращаем пустой set — иначе все чаты обработаются заново
 
 
 def dicts_to_table(dict_rows: Iterable[Dict[str, Any]], *, header: List[str]) -> List[List[Any]]:

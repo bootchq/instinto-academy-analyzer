@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import tempfile
 
 # Устанавливаем Moscow timezone для всех datetime операций
 os.environ['TZ'] = 'Europe/Moscow'
@@ -272,6 +273,43 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+REQUIRED_ANALYSIS_FIELDS = {"scores", "overall_score", "customer_segment", "summary"}
+REQUIRED_SCORE_KEYS = {"greeting", "needs_discovery", "presentation", "objection_handling", "closing", "cross_sell"}
+
+
+def validate_analysis(analysis: Dict[str, Any]) -> Tuple[bool, str]:
+    """Проверяет LLM-ответ на корректность. Возвращает (ok, reason)."""
+    # Обязательные поля
+    missing = REQUIRED_ANALYSIS_FIELDS - set(analysis.keys())
+    if missing:
+        return False, f"нет полей: {missing}"
+
+    # scores — словарь с оценками
+    scores = analysis.get("scores")
+    if not isinstance(scores, dict):
+        return False, "scores не словарь"
+
+    missing_scores = REQUIRED_SCORE_KEYS - set(scores.keys())
+    if missing_scores:
+        return False, f"нет оценок: {missing_scores}"
+
+    # Диапазон оценок 0-10
+    for key, val in scores.items():
+        v = _safe_float(val)
+        if v < 0 or v > 10:
+            return False, f"{key}={v} вне диапазона 0-10"
+
+    overall = _safe_float(analysis.get("overall_score", 0))
+    if overall < 0 or overall > 10:
+        return False, f"overall_score={overall} вне диапазона 0-10"
+
+    # summary не пустой
+    if not str(analysis.get("summary", "")).strip():
+        return False, "пустой summary"
+
+    return True, ""
+
+
 def _safe_float(val) -> float:
     """Безопасная конвертация в float (обход locale: 5,2 → 5.2)."""
     if isinstance(val, (int, float)):
@@ -318,8 +356,12 @@ def _relevant_message_sheets(all_sheets, days_back: int = 7) -> list:
     return result
 
 
-def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
-    """Загружает чаты за последние N дней и их сообщения."""
+def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    """Загружает чаты за последние N дней и их сообщения.
+
+    Возвращает (chats, manager_map) — чаты и маппинг manager_id → name.
+    Читает chats_raw ОДИН раз через get_all_values (экономия API запроса).
+    """
 
     from datetime import timedelta
 
@@ -341,13 +383,42 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
     )
     print(f"   Фильтр: чаты с {cutoff.strftime('%Y-%m-%d')} по сегодня")
 
+    manager_map: Dict[str, str] = {}
+
     try:
         chats_ws = ss.worksheet("chats_raw")
-        chats_data = chats_ws.get_all_records(expected_headers=chats_header)
+        # Читаем ОДИН раз через get_all_values (быстрее и надёжнее чем get_all_records)
+        raw_vals = chats_ws.get_all_values()
+        if not raw_vals or len(raw_vals) < 2:
+            print("   chats_raw пуст")
+            return [], {}
+
+        raw_hdr = raw_vals[0]
+        # Конвертируем в list of dicts используя заголовок из листа
+        chats_data = []
+        for row in raw_vals[1:]:
+            d = {}
+            for i, key in enumerate(raw_hdr):
+                d[key] = row[i] if i < len(row) else ""
+            chats_data.append(d)
+
+        # Строим manager_map из тех же данных (без повторного чтения)
+        if "manager_id" in raw_hdr and "manager_name" in raw_hdr:
+            mi = raw_hdr.index("manager_id")
+            mn = raw_hdr.index("manager_name")
+            for row in raw_vals[1:]:
+                if len(row) > max(mi, mn):
+                    rid = row[mi].strip()
+                    rname = row[mn].strip()
+                    if rid and rname and rid != rname:
+                        manager_map[rid] = rname
+
         print(f"   Прочитано чатов из chats_raw: {len(chats_data)}")
+        if manager_map:
+            print(f"   Маппинг менеджеров: {manager_map}")
     except Exception as e:
         print(f"Ошибка чтения chats_raw: {e}")
-        return []
+        return [], {}
 
     # Фильтруем чаты по дате created_at за последние N дней
     recent_chats = []
@@ -370,7 +441,7 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
     print(f"   Пропущено старых: {skipped_old}, без даты: {skipped_no_date}")
 
     if not recent_chats:
-        return []
+        return [], manager_map
 
     # Собираем ID нужных чатов для загрузки сообщений
     needed_chat_ids = {str(c.get("chat_id", "")) for c in recent_chats}
@@ -383,7 +454,7 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
 
         if not message_sheets:
             print(f"   Не найдены листы с сообщениями за нужный период")
-            return []
+            return [], manager_map
 
         print(f"   Читаю сообщения из {len(message_sheets)} листов: {[s.title for s in message_sheets]}")
 
@@ -401,7 +472,7 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
         print(f"   Всего сообщений для анализа: {len(messages_data)}")
     except Exception as e:
         print(f"Ошибка чтения сообщений: {e}")
-        return []
+        return [], manager_map
 
     messages_by_chat: Dict[str, List[Dict]] = {}
     for msg in messages_data:
@@ -436,7 +507,7 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
     print(f"   Пропущено с < 2 сообщений: {skipped_few_msgs}")
     print(f"   Итого чатов с сообщениями: {len(result)}")
 
-    return result
+    return result, manager_map
 
 
 def load_analyzed_chats(ss) -> Dict[str, Dict[str, Any]]:
@@ -508,32 +579,13 @@ def main():
         print("Инициализирую Groq...")
         groq = GroqClient(groq_key)
 
-        # Загружаем чаты за последние 7 дней
+        # Загружаем чаты за последние 7 дней (+ manager_map из тех же данных)
         print("Загружаю чаты за последнюю неделю...")
-        chats = load_chats_from_sheets(ss, days_back=7)
+        chats, manager_map = load_chats_from_sheets(ss, days_back=7)
         print(f"   Найдено чатов: {len(chats)}")
 
         analyzed = load_analyzed_chats(ss)
         print(f"   Уже проанализировано: {len(analyzed)}")
-
-        # Маппинг manager_id → name напрямую из chats_raw (обход expected_headers)
-        manager_map = {}
-        try:
-            raw_vals = ss.worksheet("chats_raw").get_all_values()
-            raw_hdr = raw_vals[0]
-            if "manager_id" in raw_hdr and "manager_name" in raw_hdr:
-                mi = raw_hdr.index("manager_id")
-                mn = raw_hdr.index("manager_name")
-                for row in raw_vals[1:]:
-                    if len(row) > max(mi, mn):
-                        rid = row[mi].strip()
-                        rname = row[mn].strip()
-                        if rid and rname and rid != rname:
-                            manager_map[rid] = rname
-        except Exception as e:
-            print(f"   Ошибка чтения маппинга менеджеров: {e}")
-        if manager_map:
-            print(f"   Маппинг менеджеров: {manager_map}")
 
         # Фильтруем: новые + изменённые + достаточно сообщений (>= 4)
         chats_to_analyze = []
@@ -609,6 +661,14 @@ def main():
                     errors += 1
                     continue
 
+                # Валидация структуры ответа
+                valid, reason = validate_analysis(analysis)
+                if not valid:
+                    print(f"  Невалидный LLM-ответ для чата {chat_id}: {reason}")
+                    failed_chats.append({"chat_id": chat_id, "reason": f"validation: {reason}", "response_head": response[:200]})
+                    errors += 1
+                    continue
+
                 scores = analysis.get("scores", {})
                 # Определяем менеджера: сначала из чата, потом из исходящих сообщений
                 mgr_id = str(chat.get("manager_id", "")).strip()
@@ -654,7 +714,7 @@ def main():
                 errors += 1
                 continue
 
-        # Записываем результаты
+        # Записываем результаты с retry (транзакционность)
         if results:
             print(f"\nЗаписываю {len(results)} результатов в Google Sheets...")
 
@@ -668,8 +728,39 @@ def main():
                 "analyzed_at"
             ]
 
-            rows = dicts_to_table(results, header=header)
-            append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
+            # Сохраняем буфер в файл на случай краша при записи в Sheets
+            buffer_path = os.path.join(tempfile.gettempdir(), "analysis_buffer.json")
+            with open(buffer_path, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False)
+            print(f"  Буфер сохранён: {buffer_path}")
+
+            # Retry записи в Sheets (3 попытки)
+            write_ok = False
+            for attempt in range(3):
+                try:
+                    rows = dicts_to_table(results, header=header)
+                    append_to_worksheet(ss, "analysis_raw", rows=rows[1:], header=header)
+                    write_ok = True
+                    break
+                except Exception as e:
+                    print(f"  Ошибка записи (попытка {attempt + 1}/3): {e}")
+                    if attempt < 2:
+                        time.sleep(10 * (attempt + 1))
+
+            if not write_ok:
+                from shared.alerting import alert_error
+                alert_error(
+                    service_name="analiz_chatov-posredstvom_ai",
+                    error=RuntimeError(f"Не удалось записать {len(results)} результатов в Sheets после 3 попыток"),
+                    context=f"Буфер сохранён в {buffer_path}"
+                )
+                raise RuntimeError(f"Sheets write failed. Буфер: {buffer_path}")
+
+            # Удаляем буфер после успешной записи
+            try:
+                os.unlink(buffer_path)
+            except OSError:
+                pass
 
             # Ежедневная сводка админу (БЕЗ alert_success - только сводка)
             from shared.alerting import send_telegram, ADMIN_ID
