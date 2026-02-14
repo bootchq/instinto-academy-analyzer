@@ -272,6 +272,17 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _safe_float(val) -> float:
+    """Безопасная конвертация в float (обход locale: 5,2 → 5.2)."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().replace(",", ".")
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _parse_date(date_str: str) -> Optional[datetime]:
     """Парсит дату из строки (ISO формат из Google Sheets)."""
     if not date_str or not isinstance(date_str, str):
@@ -312,18 +323,21 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
 
     from datetime import timedelta
 
-    # Заголовки для expected_headers (фикс для дубликатов в листе)
+    # Заголовки — совпадают с export_to_sheets_batch.py
     chats_header = [
         "chat_id", "channel", "manager_id", "manager_name", "client_id", "order_id",
         "has_order", "payment_status", "payment_status_ru", "is_successful",
-        "order_count", "status", "created_at", "outcome"
+        "order_count", "status", "created_at", "outcome",
+        "inbound_count", "outbound_count", "first_response_sec", "unanswered_inbound",
+        "is_closed",
     ]
     messages_header = ["chat_id", "message_id", "sent_at", "direction", "manager_id", "text"]
 
-    # Определяем границу даты (7 дней назад от сегодня)
+    # Определяем границу даты (7 дней назад, UTC для совместимости с ISO датами из Sheets)
     cutoff = datetime.combine(
         time_utils.today() - timedelta(days=days_back),
-        datetime.min.time()
+        datetime.min.time(),
+        tzinfo=timezone.utc,
     )
     print(f"   Фильтр: чаты с {cutoff.strftime('%Y-%m-%d')} по сегодня")
 
@@ -344,8 +358,10 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> List[Dict[str, Any]]:
         if not created:
             skipped_no_date += 1
             continue
-        # Сравниваем без timezone (naive)
-        if created.replace(tzinfo=None) >= cutoff:
+        # Если дата naive — считаем UTC
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if created >= cutoff:
             recent_chats.append(chat)
         else:
             skipped_old += 1
@@ -551,13 +567,17 @@ def main():
             return
 
         # Ограничиваем количество за один запуск (Groq rate limit)
+        # Приоритет: сначала новые, потом обновлённые
         if len(chats_to_analyze) > MAX_CHATS_PER_RUN:
-            print(f"   Ограничиваю до {MAX_CHATS_PER_RUN} чатов (остальные в следующий раз)")
-            chats_to_analyze = chats_to_analyze[:MAX_CHATS_PER_RUN]
+            new_chats = [c for c in chats_to_analyze if c["reanalysis_reason"] == "новый"]
+            updated_chats = [c for c in chats_to_analyze if c["reanalysis_reason"] != "новый"]
+            chats_to_analyze = (new_chats + updated_chats)[:MAX_CHATS_PER_RUN]
+            print(f"   Ограничиваю до {MAX_CHATS_PER_RUN} чатов (новых: {min(len(new_chats), MAX_CHATS_PER_RUN)}, остальные в следующий раз)")
 
         # Анализируем
         results = []
         errors = 0
+        failed_chats = []
         for i, item in enumerate(chats_to_analyze, 1):
             chat_id = item["chat_id"]
             chat = item["chat"]
@@ -584,7 +604,8 @@ def main():
                 analysis = parse_llm_response(response)
 
                 if not analysis:
-                    print(f"  Ошибка парсинга ответа LLM. Полный ответ: {response[:500]}")
+                    print(f"  Ошибка парсинга LLM для чата {chat_id}. Ответ: {response[:500]}")
+                    failed_chats.append({"chat_id": chat_id, "reason": "parse_error", "response_head": response[:200]})
                     errors += 1
                     continue
 
@@ -628,7 +649,8 @@ def main():
                 time.sleep(60)
 
             except Exception as e:
-                print(f"  Ошибка: {e}")
+                print(f"  Ошибка чата {chat_id}: {e}")
+                failed_chats.append({"chat_id": chat_id, "reason": "exception", "error": str(e)})
                 errors += 1
                 continue
 
@@ -672,11 +694,10 @@ def main():
             for mgr_name, mgr_results in sorted(by_manager.items(), key=lambda x: -len(x[1])):
                 avgs = {}
                 for sk in skill_keys:
-                    # results в памяти — оценки уже в шкале 0-10 (НЕ делим на 10, это не из Sheets)
-                    vals = [float(r.get(sk, 0)) for r in mgr_results if r.get(sk) and float(r.get(sk, 0)) > 0]
+                    vals = [_safe_float(r.get(sk, 0)) for r in mgr_results if r.get(sk) and _safe_float(r.get(sk, 0)) > 0]
                     avgs[sk] = round(sum(vals) / len(vals), 1) if vals else 0
 
-                overall_vals = [float(r.get("overall_score", 0)) for r in mgr_results if r.get("overall_score") and float(r.get("overall_score", 0)) > 0]
+                overall_vals = [_safe_float(r.get("overall_score", 0)) for r in mgr_results if r.get("overall_score") and _safe_float(r.get("overall_score", 0)) > 0]
                 overall = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else 0
 
                 lines.append(f"<b>{mgr_name}</b>: {len(mgr_results)} чатов, общая {overall}/10")
@@ -685,8 +706,15 @@ def main():
                     lines.append(f"  {scores_str}")
                 lines.append("")
 
+            if failed_chats:
+                lines.append(f"⚠️ Ошибки ({len(failed_chats)}):")
+                for fc in failed_chats[:5]:
+                    lines.append(f"  чат {fc['chat_id']}: {fc['reason']}")
+
             send_telegram(ADMIN_ID, "\n".join(lines))
             print(f"Готово! Проанализировано: {len(results)}, ошибок: {errors}")
+            if failed_chats:
+                print(f"Детали ошибок: {json.dumps(failed_chats, ensure_ascii=False)}")
         else:
             msg = f"Академия INSTINTO: анализ завершён, но результатов нет"
             if errors > 0:
