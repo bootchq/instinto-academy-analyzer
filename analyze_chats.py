@@ -385,35 +385,55 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]]
 
     manager_map: Dict[str, str] = {}
 
+    # Сколько строк читать с конца (новые чаты — внизу листа)
+    # ~100 чатов/день * 7 дней = ~700, берём 1000 с запасом
+    TAIL_ROWS = int(os.environ.get("CHATS_TAIL_ROWS", "1000"))
+
     try:
         chats_ws = ss.worksheet("chats_raw")
-        # Читаем ОДИН раз через get_all_values (быстрее и надёжнее чем get_all_records)
-        raw_vals = chats_ws.get_all_values()
-        if not raw_vals or len(raw_vals) < 2:
+
+        # Читаем заголовок
+        raw_hdr = chats_ws.row_values(1)
+        if not raw_hdr:
             print("   chats_raw пуст")
             return [], {}
 
-        raw_hdr = raw_vals[0]
-        # Конвертируем в list of dicts используя заголовок из листа
+        # Быстро узнаём сколько строк заполнено (читаем только колонку A — chat_id)
+        filled_rows = len(chats_ws.col_values(1))
+        if filled_rows < 2:
+            print("   chats_raw: нет данных")
+            return [], {}
+
+        # Читаем только хвост (последние TAIL_ROWS строк)
+        start_row = max(2, filled_rows - TAIL_ROWS + 1)
+        last_col = chr(64 + min(len(raw_hdr), 26))  # S для 19 колонок
+        tail_range = f"A{start_row}:{last_col}{filled_rows}"
+        tail_data = chats_ws.get(tail_range)
+        if not tail_data:
+            print("   chats_raw: нет данных в хвосте")
+            return [], {}
+
+        print(f"   Прочитано {len(tail_data)} строк из chats_raw (хвост, строки {start_row}-{total_rows})")
+
+        # Конвертируем в list of dicts
         chats_data = []
-        for row in raw_vals[1:]:
+        for row in tail_data:
             d = {}
             for i, key in enumerate(raw_hdr):
                 d[key] = row[i] if i < len(row) else ""
             chats_data.append(d)
 
-        # Строим manager_map из тех же данных (без повторного чтения)
+        # Строим manager_map из тех же данных
         if "manager_id" in raw_hdr and "manager_name" in raw_hdr:
             mi = raw_hdr.index("manager_id")
             mn = raw_hdr.index("manager_name")
-            for row in raw_vals[1:]:
+            for row in tail_data:
                 if len(row) > max(mi, mn):
                     rid = row[mi].strip()
                     rname = row[mn].strip()
                     if rid and rname and rid != rname:
                         manager_map[rid] = rname
 
-        print(f"   Прочитано чатов из chats_raw: {len(chats_data)}")
         if manager_map:
             print(f"   Маппинг менеджеров: {manager_map}")
     except Exception as e:
