@@ -154,90 +154,56 @@ DEEP_ANALYSIS_PROMPT = """Ты тренер по продажам бренда I
 
 # === Groq клиент (копия из analyze_chats.py) ===
 
-class GroqClient:
-    """Groq клиент с умным rate limiting на основе заголовков ответа."""
-    BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+class LLMClient:
+    """Универсальный клиент для OpenAI-совместимых API (Groq, Cerebras и др.)."""
 
-    def __init__(self, api_key: str, model: str = "llama-3.1-8b-instant"):
-        self.api_key = api_key
-        self.model = model
+    PROVIDERS = {
+        "groq": {
+            "url": "https://api.groq.com/openai/v1/chat/completions",
+            "model": "llama-3.1-8b-instant",
+            "env_key": "GROQ_API_KEY",
+        },
+        "cerebras": {
+            "url": "https://api.cerebras.ai/v1/chat/completions",
+            "model": "llama3.1-8b",
+            "env_key": "CEREBRAS_API_KEY",
+        },
+    }
+
+    def __init__(self, provider: str = "groq", api_key: str = "", model: str = ""):
+        cfg = self.PROVIDERS.get(provider, self.PROVIDERS["groq"])
+        self.provider = provider
+        self.base_url = cfg["url"]
+        self.model = model or cfg["model"]
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         })
         self._stats = {"ok": 0, "rate_limited": 0, "total_wait": 0.0}
+        self._next_wait = 2.0
+        print(f"  LLM: {provider} / {self.model}")
 
     @property
     def adaptive_pause(self) -> float:
-        """Вычисляет паузу на основе заголовков последнего ответа Groq."""
         return self._next_wait
 
-    def _calc_wait_from_headers(self, headers) -> float:
-        """Groq возвращает x-ratelimit-remaining-tokens и x-ratelimit-reset-tokens.
-        Если токенов мало — ждём до сброса. Если много — идём быстро."""
-        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
-        reset_tokens = headers.get("x-ratelimit-reset-tokens")
-        remaining_reqs = headers.get("x-ratelimit-remaining-requests")
-        reset_reqs = headers.get("x-ratelimit-reset-requests")
-
-        wait = 2.0  # минимальная пауза
-
-        # Парсим reset time (формат: "1m30s", "45s", "500ms")
-        def parse_reset(val):
-            if not val:
-                return 0
-            total = 0
-            import re
-            m = re.findall(r'(\d+(?:\.\d+)?)(ms|s|m)', str(val))
-            for num, unit in m:
-                n = float(num)
-                if unit == 'ms':
-                    total += n / 1000
-                elif unit == 's':
-                    total += n
-                elif unit == 'm':
-                    total += n * 60
-            return total
-
-        # Лимит по токенам (главный ограничитель для больших промптов)
-        if remaining_tokens is not None:
-            rem = int(remaining_tokens)
-            if rem < 1000:
-                # Мало токенов — ждём полный сброс
-                wait = max(wait, parse_reset(reset_tokens) + 1)
-            elif rem < 3000:
-                # Средне — ждём половину
-                wait = max(wait, parse_reset(reset_tokens) * 0.5 + 1)
-            # Иначе — токенов достаточно, не ждём
-
-        # Лимит по запросам
-        if remaining_reqs is not None:
-            rem_r = int(remaining_reqs)
-            if rem_r < 2:
-                wait = max(wait, parse_reset(reset_reqs) + 1)
-
-        return min(wait, 90)  # максимум 90с
-
-    def chat(self, prompt: str, max_tokens: int = 4000) -> str:
+    def chat(self, prompt: str, max_tokens: int = 1500) -> str:
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.3,
         }
-        self._next_wait = 2.0
         for attempt in range(5):
             try:
-                resp = self.session.post(self.BASE_URL, json=payload, timeout=90)
+                resp = self.session.post(self.base_url, json=payload, timeout=120)
                 if resp.status_code == 429:
                     retry_after = resp.headers.get("retry-after")
                     if retry_after:
                         wait = min(float(retry_after) + 1, 120)
                     else:
-                        wait = self._calc_wait_from_headers(resp.headers)
-                        if wait < 10:
-                            wait = 30 * (attempt + 1)
+                        wait = 30 * (attempt + 1)
                     self._stats["rate_limited"] += 1
                     self._stats["total_wait"] += wait
                     print(f"  Rate limit, жду {wait:.0f}с (попытка {attempt + 1}/5)...")
@@ -245,21 +211,25 @@ class GroqClient:
                     continue
                 resp.raise_for_status()
                 self._stats["ok"] += 1
-                # Вычисляем оптимальную паузу из заголовков успешного ответа
-                self._next_wait = self._calc_wait_from_headers(resp.headers)
+                # Пауза на основе remaining токенов (если заголовок есть)
+                remaining = resp.headers.get("x-ratelimit-remaining-tokens")
+                if remaining and int(remaining) < 5000:
+                    self._next_wait = 5.0
+                else:
+                    self._next_wait = 2.0
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.exceptions.RequestException as e:
                 if attempt < 4:
                     time.sleep(10 * (attempt + 1))
                     continue
-                raise RuntimeError(f"Groq API error: {e}")
-        raise RuntimeError("Groq API: превышено число попыток")
+                raise RuntimeError(f"LLM API error ({self.provider}): {e}")
+        raise RuntimeError(f"LLM API ({self.provider}): превышено число попыток")
 
     def print_stats(self):
         s = self._stats
         total = s["ok"] + s["rate_limited"]
         if total:
-            print(f"  Groq stats: {s['ok']} OK, {s['rate_limited']} rate-limited, "
+            print(f"  LLM stats ({self.provider}): {s['ok']} OK, {s['rate_limited']} rate-limited, "
                   f"потеряно на ожидании: {s['total_wait']:.0f}с")
 
 
@@ -955,9 +925,16 @@ def main():
     print(f"              batch_size={BATCH_SIZE}, pause={PAUSE_SEC}с\n")
 
     try:
-        groq_key = os.environ.get("GROQ_API_KEY")
-        if not groq_key:
-            raise ValueError("GROQ_API_KEY не задан")
+        # Выбор LLM провайдера: cerebras (по умолчанию), groq
+        provider = os.environ.get("LLM_PROVIDER", "cerebras")
+        provider_cfg = LLMClient.PROVIDERS.get(provider, LLMClient.PROVIDERS["cerebras"])
+        api_key = os.environ.get(provider_cfg["env_key"])
+        if not api_key:
+            # Фоллбэк на Groq если Cerebras ключа нет
+            provider = "groq"
+            api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError(f"Нет API ключа для {provider}")
 
         sheets_id = os.environ.get("GOOGLE_SHEETS_ID")
         sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
@@ -965,7 +942,7 @@ def main():
             raise ValueError("GOOGLE_SHEETS_ID или GOOGLE_SERVICE_ACCOUNT_JSON не заданы")
 
         ss = open_spreadsheet(spreadsheet_id=sheets_id, service_account_json_path=sa_json)
-        groq = GroqClient(groq_key)
+        groq = LLMClient(provider=provider, api_key=api_key)
 
         # Фаза 1: Скрининг
         candidates = phase1_screening(ss)
