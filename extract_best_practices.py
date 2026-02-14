@@ -442,14 +442,43 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
     print(f"  Взято из analysis_raw: {len(results)}")
 
     # === Шаг 2: Для кандидатов БЕЗ оценки — пробуем LLM анализ ===
-    to_analyze = [c for c in candidates if str(c.get("chat_id", "")) not in existing_scores]
-    print(f"  Кандидатов без оценки: {len(to_analyze)}")
 
+    # Читаем уже обработанные в best_practices_analysis (для resume)
+    already_done: set = set()
+    try:
+        ws_bp = ss.worksheet("best_practices_analysis")
+        vals = ws_bp.get_all_values()
+        if len(vals) > 1:
+            hdr_bp = vals[0]
+            cid_idx = hdr_bp.index("chat_id") if "chat_id" in hdr_bp else 0
+            for row in vals[1:]:
+                if cid_idx < len(row) and row[cid_idx]:
+                    already_done.add(row[cid_idx].strip())
+        print(f"  Уже обработано в best_practices_analysis: {len(already_done)}")
+    except Exception:
+        pass
+
+    to_analyze = [
+        c for c in candidates
+        if str(c.get("chat_id", "")) not in existing_scores
+        and str(c.get("chat_id", "")) not in already_done
+    ]
+    total_remaining = len(to_analyze)
+    print(f"  Кандидатов без оценки (минус resume): {total_remaining}")
     print(f"  Переиспользовано из analysis_raw: {len(results)}")
-    print(f"  Нужно проанализировать: {len(to_analyze)}")
+
+    # Лимит чатов за один запуск (Railway timeout ~10 мин)
+    MAX_PER_RUN = int(os.environ.get("BP_MAX_PER_RUN", "20"))
+    if total_remaining > MAX_PER_RUN:
+        print(f"  Ограничиваю до {MAX_PER_RUN} чатов за этот запуск (из {total_remaining})")
+        to_analyze = to_analyze[:MAX_PER_RUN]
+        remaining_after = total_remaining - MAX_PER_RUN
+    else:
+        remaining_after = 0
 
     if not to_analyze:
-        return results
+        print("  Все кандидаты обработаны!")
+        return results, 0
 
     # Загружаем сообщения для чатов, которые нужно анализировать
     needed_ids = {str(c.get("chat_id", "")) for c in to_analyze}
@@ -534,8 +563,8 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
     if batch_results:
         _save_batch(ss, batch_results, header)
 
-    print(f"\n  Итого результатов: {len(results)} (ошибок: {errors})")
-    return results
+    print(f"\n  Итого результатов: {len(results)} (ошибок: {errors}), осталось: {remaining_after}")
+    return results, remaining_after
 
 
 def _save_batch(ss, batch: List[Dict], header: List[str]):
@@ -872,13 +901,22 @@ def main():
             send_telegram(ADMIN_ID, "Best Practices: нет кандидатов для анализа")
             return
 
-        # Фаза 2: LLM анализ
-        all_results = phase2_analysis(ss, groq, candidates)
+        # Фаза 2: LLM анализ (обрабатывает до BP_MAX_PER_RUN чатов за запуск)
+        all_results, remaining = phase2_analysis(ss, groq, candidates)
         if not all_results:
             print("Нет результатов анализа!")
             send_telegram(ADMIN_ID, "Best Practices: нет результатов анализа")
             return
 
+        if remaining > 0:
+            # Ещё не все обработаны — пропускаем фазы 3-4, ждём следующий запуск
+            msg = (f"Best Practices: обработано {len(all_results)} чатов, "
+                   f"осталось {remaining}. Следующий запуск продолжит.")
+            print(msg)
+            send_telegram(ADMIN_ID, msg)
+            return
+
+        # Все кандидаты обработаны — фазы 3 и 4
         # Фаза 3: Глубокий анализ
         deep_results = phase3_deep_analysis(ss, groq, all_results)
 
