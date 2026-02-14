@@ -155,6 +155,7 @@ DEEP_ANALYSIS_PROMPT = """Ты тренер по продажам бренда I
 # === Groq клиент (копия из analyze_chats.py) ===
 
 class GroqClient:
+    """Groq клиент с умным rate limiting на основе заголовков ответа."""
     BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(self, api_key: str, model: str = "llama-3.1-8b-instant"):
@@ -165,15 +166,58 @@ class GroqClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         })
-        # Адаптивная пауза: растёт при rate limit, снижается при успехах
-        self._pause = float(os.environ.get("BP_PAUSE_SEC", "3"))
-        self._min_pause = 2.0
-        self._max_pause = 15.0
-        self._successes_since_limit = 0
+        self._stats = {"ok": 0, "rate_limited": 0, "total_wait": 0.0}
 
     @property
     def adaptive_pause(self) -> float:
-        return self._pause
+        """Вычисляет паузу на основе заголовков последнего ответа Groq."""
+        return self._next_wait
+
+    def _calc_wait_from_headers(self, headers) -> float:
+        """Groq возвращает x-ratelimit-remaining-tokens и x-ratelimit-reset-tokens.
+        Если токенов мало — ждём до сброса. Если много — идём быстро."""
+        remaining_tokens = headers.get("x-ratelimit-remaining-tokens")
+        reset_tokens = headers.get("x-ratelimit-reset-tokens")
+        remaining_reqs = headers.get("x-ratelimit-remaining-requests")
+        reset_reqs = headers.get("x-ratelimit-reset-requests")
+
+        wait = 2.0  # минимальная пауза
+
+        # Парсим reset time (формат: "1m30s", "45s", "500ms")
+        def parse_reset(val):
+            if not val:
+                return 0
+            total = 0
+            import re
+            m = re.findall(r'(\d+(?:\.\d+)?)(ms|s|m)', str(val))
+            for num, unit in m:
+                n = float(num)
+                if unit == 'ms':
+                    total += n / 1000
+                elif unit == 's':
+                    total += n
+                elif unit == 'm':
+                    total += n * 60
+            return total
+
+        # Лимит по токенам (главный ограничитель для больших промптов)
+        if remaining_tokens is not None:
+            rem = int(remaining_tokens)
+            if rem < 1000:
+                # Мало токенов — ждём полный сброс
+                wait = max(wait, parse_reset(reset_tokens) + 1)
+            elif rem < 3000:
+                # Средне — ждём половину
+                wait = max(wait, parse_reset(reset_tokens) * 0.5 + 1)
+            # Иначе — токенов достаточно, не ждём
+
+        # Лимит по запросам
+        if remaining_reqs is not None:
+            rem_r = int(remaining_reqs)
+            if rem_r < 2:
+                wait = max(wait, parse_reset(reset_reqs) + 1)
+
+        return min(wait, 90)  # максимум 90с
 
     def chat(self, prompt: str, max_tokens: int = 4000) -> str:
         payload = {
@@ -182,29 +226,27 @@ class GroqClient:
             "max_tokens": max_tokens,
             "temperature": 0.3,
         }
+        self._next_wait = 2.0
         for attempt in range(5):
             try:
                 resp = self.session.post(self.BASE_URL, json=payload, timeout=90)
                 if resp.status_code == 429:
-                    # Читаем retry-after из заголовка если есть
                     retry_after = resp.headers.get("retry-after")
                     if retry_after:
                         wait = min(float(retry_after) + 1, 120)
                     else:
-                        wait = 30 * (attempt + 1)
-                    # Увеличиваем адаптивную паузу
-                    self._pause = min(self._pause * 1.5, self._max_pause)
-                    self._successes_since_limit = 0
-                    print(f"  Rate limit, жду {wait:.0f}с (попытка {attempt + 1}/5, пауза→{self._pause:.1f}с)...")
+                        wait = self._calc_wait_from_headers(resp.headers)
+                        if wait < 10:
+                            wait = 30 * (attempt + 1)
+                    self._stats["rate_limited"] += 1
+                    self._stats["total_wait"] += wait
+                    print(f"  Rate limit, жду {wait:.0f}с (попытка {attempt + 1}/5)...")
                     time.sleep(wait)
                     continue
                 resp.raise_for_status()
-                # Успех — постепенно снижаем паузу
-                self._successes_since_limit += 1
-                if self._successes_since_limit >= 10 and self._pause > self._min_pause:
-                    self._pause = max(self._pause * 0.85, self._min_pause)
-                    self._successes_since_limit = 0
-                    print(f"    (пауза снижена→{self._pause:.1f}с)")
+                self._stats["ok"] += 1
+                # Вычисляем оптимальную паузу из заголовков успешного ответа
+                self._next_wait = self._calc_wait_from_headers(resp.headers)
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.exceptions.RequestException as e:
                 if attempt < 4:
@@ -212,6 +254,13 @@ class GroqClient:
                     continue
                 raise RuntimeError(f"Groq API error: {e}")
         raise RuntimeError("Groq API: превышено число попыток")
+
+    def print_stats(self):
+        s = self._stats
+        total = s["ok"] + s["rate_limited"]
+        if total:
+            print(f"  Groq stats: {s['ok']} OK, {s['rate_limited']} rate-limited, "
+                  f"потеряно на ожидании: {s['total_wait']:.0f}с")
 
 
 # === Утилиты ===
@@ -586,6 +635,7 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
     if batch_results:
         _save_batch(ss, batch_results, header)
 
+    groq.print_stats()
     print(f"\n  Итого результатов: {len(results)} (ошибок: {errors}), осталось: {remaining_after}")
     return results, remaining_after
 
