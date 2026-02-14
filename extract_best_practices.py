@@ -157,7 +157,7 @@ DEEP_ANALYSIS_PROMPT = """Ты тренер по продажам бренда I
 class LLMClient:
     """Мультипровайдерный LLM клиент с автофоллбэком.
 
-    Cerebras (основной) -> Groq (фоллбэк).
+    Cerebras (основной) -> SambaNova -> Groq (фоллбэк).
     При rate limit одного провайдера автоматически переключается на другого.
     """
 
@@ -167,6 +167,12 @@ class LLMClient:
             "model": "llama-3.3-70b",
             "env_key": "CEREBRAS_API_KEY",
             "pause": 2,  # 30 RPM
+        },
+        "sambanova": {
+            "url": "https://api.sambanova.ai/v1/chat/completions",
+            "model": "Meta-Llama-3.3-70B-Instruct",
+            "env_key": "SAMBANOVA_API_KEY",
+            "pause": 3,  # 40 RPM
         },
         "groq": {
             "url": "https://api.groq.com/openai/v1/chat/completions",
@@ -180,7 +186,7 @@ class LLMClient:
         # Инициализируем все доступные провайдеры
         self._clients: Dict[str, dict] = {}
         self._order: List[str] = []  # порядок приоритета
-        for name in ["cerebras", "groq"]:
+        for name in ["cerebras", "sambanova", "groq"]:
             cfg = self.PROVIDERS[name]
             api_key = os.environ.get(cfg["env_key"], "")
             if api_key:
