@@ -83,7 +83,7 @@ def upsert_worksheet(
                 cols=max(needed_cols + 5, current_cols)
             )
 
-        ws.update(values=list(rows), range_name="A1")
+        ws.update(values=list(rows), range_name="A1", value_input_option="RAW")
     except Exception as e:
         # Логируем ошибку но не падаем
         print(f"Ошибка обновления листа {title}: {e}")
@@ -278,11 +278,15 @@ def approve_user(
 
         for row_num, row in enumerate(values[1:], start=2):
             if tid_idx < len(row) and str(row[tid_idx]) == str(telegram_id):
-                # Обновляем ячейки
-                ws.update_cell(row_num, role_idx + 1, role)
-                ws.update_cell(row_num, status_idx + 1, "approved")
-                ws.update_cell(row_num, approved_at_idx + 1, time_utils.utc_now().isoformat())
-                ws.update_cell(row_num, approved_by_idx + 1, str(approved_by))
+                # Batch update — 1 запрос вместо 4
+                sheet_title = ws.title
+                updates = [
+                    {"range": f"{sheet_title}!{chr(65 + role_idx)}{row_num}", "values": [[role]]},
+                    {"range": f"{sheet_title}!{chr(65 + status_idx)}{row_num}", "values": [["approved"]]},
+                    {"range": f"{sheet_title}!{chr(65 + approved_at_idx)}{row_num}", "values": [[time_utils.utc_now().isoformat()]]},
+                    {"range": f"{sheet_title}!{chr(65 + approved_by_idx)}{row_num}", "values": [[str(approved_by)]]},
+                ]
+                ws.spreadsheet.values_batch_update({"data": updates, "valueInputOption": "RAW"})
                 return True
         return False
     except Exception as e:

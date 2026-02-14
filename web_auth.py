@@ -84,14 +84,6 @@ def run_migrations():
         logger.warning(f"Миграции пропущены: {e}")
 
 
-def hash_password(password: str) -> str:
-    """
-    Хеширует пароль используя bcrypt.
-    DEPRECATED: Используй hash_password_bcrypt() напрямую.
-    """
-    return hash_password_bcrypt(password)
-
-
 def hash_password_bcrypt(password: str) -> str:
     """Хеширует пароль используя bcrypt."""
     salt = bcrypt.gensalt()
@@ -499,7 +491,7 @@ def approve_web_request(request_id: int) -> tuple:
 
         # Генерируем логин/пароль
         login, password = generate_credentials()
-        password_hash = hash_password(password)
+        password_hash = hash_password_bcrypt(password)
 
         # Создаём пользователя
         cur.execute(

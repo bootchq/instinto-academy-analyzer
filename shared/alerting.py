@@ -20,16 +20,22 @@ def send_telegram(chat_id: int, text: str, parse_mode: str = "HTML"):
         return False
 
     url = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
-    try:
-        response = requests.post(url, json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode
-        }, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"⚠️ Не удалось отправить алерт: {e}")
-        return False
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": parse_mode
+            }, timeout=10)
+            if response.status_code == 200:
+                return True
+            print(f"Telegram API вернул {response.status_code} (попытка {attempt + 1}/3)")
+        except Exception as e:
+            print(f"Ошибка отправки алерта (попытка {attempt + 1}/3): {e}")
+        if attempt < 2:
+            import time
+            time.sleep(3 * (attempt + 1))
+    return False
 
 
 def alert_error(service_name: str, error: Exception, context: str = ""):

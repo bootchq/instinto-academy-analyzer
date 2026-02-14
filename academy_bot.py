@@ -527,23 +527,6 @@ class AcademyBot:
             logger.error(f"Ошибка удаления доступа: {e}")
             await callback.message.answer("Ошибка при удалении доступа.")
 
-    async def on_request_access(self, callback: CallbackQuery):
-        """Обработчик запроса доступа — запрашиваем контакт."""
-        await callback.answer()
-
-        # Запрашиваем контакт для получения телефона
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Отправить контакт", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-
-        await callback.message.answer(
-            "Для подачи заявки поделитесь своим контактом.\n"
-            "Это нужно для верификации.",
-            reply_markup=keyboard
-        )
-
     async def _handle_web_access_request(self, message: Message):
         """Обработчик запроса доступа с сайта через deep-link — запрашиваем контакт."""
         from web_auth import get_db
@@ -720,77 +703,6 @@ class AcademyBot:
                 "Произошла ошибка. Попробуйте позже.",
                 reply_markup=ReplyKeyboardRemove()
             )
-
-    async def on_approve(self, callback: CallbackQuery):
-        """Обработчик одобрения заявки."""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("Только админ может одобрять заявки", show_alert=True)
-            return
-
-        await callback.answer()
-
-        # approve:123456:manager
-        parts = callback.data.split(":")
-        user_tid = parts[1]
-        role = parts[2]
-
-        success = approve_user(
-            self.spreadsheet,
-            telegram_id=user_tid,
-            role=role,
-            approved_by=ADMIN_ID
-        )
-
-        if success:
-            role_text = "менеджер" if role == "manager" else "руководитель"
-
-            # Обновляем сообщение админу
-            await callback.message.edit_text(
-                callback.message.text + f"\n\n✅ Одобрено как {role_text}"
-            )
-
-            # Уведомляем пользователя
-            try:
-                await self.bot.send_message(
-                    int(user_tid),
-                    f"Твоя заявка одобрена!\n"
-                    f"Роль: {role_text}\n\n"
-                    f"Напиши /modules чтобы начать обучение."
-                )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить пользователя {user_tid}: {e}")
-        else:
-            await callback.message.answer("Ошибка при одобрении. Попробуй ещё раз.")
-
-    async def on_reject(self, callback: CallbackQuery):
-        """Обработчик отклонения заявки."""
-        if callback.from_user.id != ADMIN_ID:
-            await callback.answer("Только админ может отклонять заявки", show_alert=True)
-            return
-
-        await callback.answer()
-
-        # reject:123456
-        user_tid = callback.data.split(":")[1]
-
-        success = reject_user(self.spreadsheet, telegram_id=user_tid)
-
-        if success:
-            # Обновляем сообщение админу
-            await callback.message.edit_text(
-                callback.message.text + "\n\n❌ Отклонено"
-            )
-
-            # Уведомляем пользователя
-            try:
-                await self.bot.send_message(
-                    int(user_tid),
-                    "К сожалению, твоя заявка была отклонена."
-                )
-            except Exception as e:
-                logger.error(f"Не удалось уведомить пользователя {user_tid}: {e}")
-        else:
-            await callback.message.answer("Ошибка при отклонении. Попробуй ещё раз.")
 
     async def on_web_approve(self, callback: CallbackQuery):
         """Обработчик одобрения веб-заявки."""

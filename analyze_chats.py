@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import time
 import tempfile
+from collections import Counter
 
 # Устанавливаем Moscow timezone для всех datetime операций
 os.environ['TZ'] = 'Europe/Moscow'
@@ -341,11 +343,16 @@ def _relevant_message_sheets(all_sheets, days_back: int = 7) -> list:
     start_date = today - timedelta(days=days_back)
 
     needed_months = set()
-    d = start_date
-    while d <= today:
+    # Итерируем по месяцам от start_date до today
+    d = start_date.replace(day=1)
+    end = today.replace(day=1)
+    while d <= end:
         needed_months.add(f"messages_{d.strftime('%Y_%m')}")
-        d += timedelta(days=15)  # Прыгаем на 15 дней чтобы покрыть оба месяца
-    needed_months.add(f"messages_{today.strftime('%Y_%m')}")
+        # Переход к следующему месяцу
+        if d.month == 12:
+            d = d.replace(year=d.year + 1, month=1)
+        else:
+            d = d.replace(month=d.month + 1)
 
     # Также добавляем messages_raw как fallback
     result = []
@@ -375,11 +382,11 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]]
     ]
     messages_header = ["chat_id", "message_id", "sent_at", "direction", "manager_id", "text"]
 
-    # Определяем границу даты (7 дней назад, UTC для совместимости с ISO датами из Sheets)
+    # Определяем границу даты (7 дней назад, MSK — совпадает с time_utils.today())
     cutoff = datetime.combine(
         time_utils.today() - timedelta(days=days_back),
         datetime.min.time(),
-        tzinfo=timezone.utc,
+        tzinfo=time_utils.MSK,
     )
     print(f"   Фильтр: чаты с {cutoff.strftime('%Y-%m-%d')} по сегодня")
 
@@ -542,11 +549,18 @@ def load_analyzed_chats(ss) -> Dict[str, Dict[str, Any]]:
         for i, row in enumerate(data):
             chat_id = str(row.get("chat_id", ""))
             if chat_id:
-                result[chat_id] = {
+                new_entry = {
                     "message_count": int(row.get("message_count", 0)),
                     "chat_status": str(row.get("chat_status", "")),
-                    "row_index": i + 2,  # +2: заголовок + 0-based index
+                    "row_index": i + 2,
+                    "analyzed_at": str(row.get("analyzed_at", "")),
                 }
+                # Дедупликация: берем запись с более поздним analyzed_at
+                if chat_id in result:
+                    if new_entry["analyzed_at"] > result[chat_id]["analyzed_at"]:
+                        result[chat_id] = new_entry
+                else:
+                    result[chat_id] = new_entry
         return result
     except Exception:
         return {}
@@ -574,7 +588,19 @@ def needs_reanalysis(chat_id: str, current_msg_count: int, current_status: str,
     return False, ""
 
 
+_shutdown_requested = False
+
+
+def _handle_sigterm(signum, frame):
+    """Graceful shutdown при SIGTERM от Railway."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    print("SIGTERM получен, завершаю после текущего чата...")
+
+
 def main():
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
     # Настройка уведомлений
     telegram = TelegramNotifier(
         bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
@@ -582,6 +608,35 @@ def main():
     )
 
     try:
+        # Проверяем и восстанавливаем буфер от предыдущего краша
+        buffer_path = os.path.join(tempfile.gettempdir(), "analysis_buffer.json")
+        if os.path.exists(buffer_path):
+            print(f"Найден буфер от предыдущего запуска: {buffer_path}")
+            try:
+                with open(buffer_path, "r", encoding="utf-8") as f:
+                    buffered = json.load(f)
+                if buffered:
+                    print(f"  Восстанавливаю {len(buffered)} результатов из буфера...")
+                    sheets_id_buf = os.environ.get("GOOGLE_SHEETS_ID")
+                    sa_json_buf = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+                    if sheets_id_buf and sa_json_buf:
+                        ss_buf = open_spreadsheet(spreadsheet_id=sheets_id_buf, service_account_json_path=sa_json_buf)
+                        header = [
+                            "chat_id", "manager_id", "manager_name", "channel",
+                            "message_count", "chat_status",
+                            "customer_segment", "overall_score",
+                            "greeting_score", "needs_score", "presentation_score",
+                            "objection_score", "closing_score", "cross_sell_score",
+                            "techniques", "missed_opportunities", "is_ethical", "summary",
+                            "analyzed_at"
+                        ]
+                        rows = dicts_to_table(buffered, header=header)
+                        append_to_worksheet(ss_buf, "analysis_raw", rows=rows[1:], header=header)
+                        os.unlink(buffer_path)
+                        print(f"  Буфер успешно записан и удален")
+            except Exception as e:
+                print(f"  Ошибка восстановления буфера: {e}")
+
         # Проверяем ключи
         groq_key = os.environ.get("GROQ_API_KEY")
         if not groq_key:
@@ -656,6 +711,10 @@ def main():
             messages = item["messages"]
             reason = item["reanalysis_reason"]
 
+            if _shutdown_requested:
+                print(f"Graceful shutdown: обработано {i-1}/{len(chats_to_analyze)} чатов")
+                break
+
             print(f"\n[{i}/{len(chats_to_analyze)}] Анализирую чат {chat_id} ({reason})...")
 
             # Умная обрезка до 50 сообщений
@@ -667,9 +726,24 @@ def main():
                 print(f"  ⚠️ Диалог длинный ({len(dialog_text)} символов), обрезаю до 12000")
                 dialog_text = dialog_text[:12000] + "\n[...диалог обрезан по лимиту символов...]"
 
-            prompt = ANALYSIS_PROMPT.format(dialog=dialog_text)
+            # Добавляем контекст чата в промпт
+            context_parts = []
+            if chat.get("has_order"):
+                context_parts.append(f"Заказ: {'да' if chat['has_order'] in ('True', 'true', '1', True) else 'нет'}")
+            if chat.get("payment_status_ru"):
+                context_parts.append(f"Оплата: {chat['payment_status_ru']}")
+            if chat.get("outcome"):
+                context_parts.append(f"Итог: {chat['outcome']}")
+            if chat.get("is_closed"):
+                context_parts.append(f"Закрыт: {chat['is_closed']}")
+            context_line = ""
+            if context_parts:
+                context_line = f"\n\nКОНТЕКСТ ЧАТА: {', '.join(context_parts)}"
+
+            prompt = ANALYSIS_PROMPT.format(dialog=dialog_text + context_line)
 
             try:
+                request_start = time.time()
                 response = groq.chat(prompt, max_tokens=4000)
                 # Логируем первые 200 символов для диагностики
                 print(f"  LLM ответ (начало): {response[:200]}...")
@@ -694,10 +768,15 @@ def main():
                 mgr_id = str(chat.get("manager_id", "")).strip()
                 mgr_name = str(chat.get("manager_name", "")).strip()
                 if not mgr_id:
+                    # Считаем кто из менеджеров написал больше всего исходящих сообщений
+                    mgr_counts = Counter()
                     for m in messages:
-                        if m.get("direction") == "out" and str(m.get("manager_id", "")).strip():
-                            mgr_id = str(m["manager_id"]).strip()
-                            break
+                        if m.get("direction") == "out":
+                            mid = str(m.get("manager_id", "")).strip()
+                            if mid:
+                                mgr_counts[mid] += 1
+                    if mgr_counts:
+                        mgr_id = mgr_counts.most_common(1)[0][0]
                 if mgr_id and not mgr_name:
                     mgr_name = manager_map.get(mgr_id, mgr_id)
 
@@ -725,8 +804,13 @@ def main():
                 results.append(result)
 
                 print(f"  Сегмент: {result['customer_segment']}, оценка: {result['overall_score']}")
-                # Пауза 60с между запросами (Groq rate limit на бесплатном плане)
-                time.sleep(60)
+                # Умная пауза: вычитаем время запроса, не спим после последнего
+                if i < len(chats_to_analyze):
+                    elapsed = time.time() - request_start
+                    sleep_time = max(0, 60 - elapsed)
+                    if sleep_time > 0:
+                        print(f"  Пауза {sleep_time:.0f}с (запрос занял {elapsed:.0f}с)")
+                        time.sleep(sleep_time)
 
             except Exception as e:
                 print(f"  Ошибка чата {chat_id}: {e}")
