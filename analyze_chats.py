@@ -405,8 +405,8 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]]
             print("   chats_raw пуст")
             return [], {}
 
-        # Быстро узнаём сколько строк заполнено (читаем только колонку A — chat_id)
-        filled_rows = len(chats_ws.col_values(1))
+        # Узнаём кол-во строк через metadata (без загрузки данных)
+        filled_rows = chats_ws.row_count
         if filled_rows < 2:
             print("   chats_raw: нет данных")
             return [], {}
@@ -483,18 +483,39 @@ def load_chats_from_sheets(ss, days_back: int = 7) -> Tuple[List[Dict[str, Any]]
             print(f"   Не найдены листы с сообщениями за нужный период")
             return [], manager_map
 
-        print(f"   Читаю сообщения из {len(message_sheets)} листов: {[s.title for s in message_sheets]}")
+        sheet_titles = [s.title for s in message_sheets]
+        print(f"   Читаю сообщения из {len(message_sheets)} листов: {sheet_titles}")
 
-        for sheet in message_sheets:
-            try:
-                sheet_data = sheet.get_all_records(expected_headers=messages_header)
-                # Фильтруем: берём только сообщения нужных чатов
-                relevant = [m for m in sheet_data if str(m.get("chat_id", "")) in needed_chat_ids]
-                messages_data.extend(relevant)
-                print(f"   {sheet.title}: {len(relevant)}/{len(sheet_data)} сообщений (отфильтровано)")
-            except Exception as e:
-                print(f"   Ошибка чтения {sheet.title}: {e}")
-                continue
+        # Batch загрузка всех листов одним запросом
+        ranges = [f"{title}!A1:F" for title in sheet_titles]
+        try:
+            batch_result = ss.values_batch_get(ranges)
+            for vr in batch_result.get("valueRanges", []):
+                rows = vr.get("values", [])
+                if len(rows) < 2:
+                    continue
+                header = rows[0]
+                total = 0
+                relevant_count = 0
+                for row in rows[1:]:
+                    total += 1
+                    msg = {header[i]: row[i] if i < len(row) else "" for i in range(len(header))}
+                    if str(msg.get("chat_id", "")) in needed_chat_ids:
+                        messages_data.append(msg)
+                        relevant_count += 1
+                sheet_range = vr.get("range", "?")
+                print(f"   {sheet_range}: {relevant_count}/{total} сообщений (отфильтровано)")
+        except Exception as e:
+            print(f"   Ошибка batch загрузки: {e}, пробую последовательно...")
+            # Фоллбэк на последовательную загрузку
+            for sheet in message_sheets:
+                try:
+                    sheet_data = sheet.get_all_records(expected_headers=messages_header)
+                    relevant = [m for m in sheet_data if str(m.get("chat_id", "")) in needed_chat_ids]
+                    messages_data.extend(relevant)
+                    print(f"   {sheet.title}: {len(relevant)}/{len(sheet_data)} сообщений")
+                except Exception as e2:
+                    print(f"   Ошибка чтения {sheet.title}: {e2}")
 
         print(f"   Всего сообщений для анализа: {len(messages_data)}")
     except Exception as e:
