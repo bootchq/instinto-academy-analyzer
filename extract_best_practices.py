@@ -39,7 +39,7 @@ import requests
 
 # === Конфигурация ===
 
-MAX_CANDIDATES = int(os.environ.get("BP_MAX_CANDIDATES", "300"))
+MAX_CANDIDATES = int(os.environ.get("BP_MAX_CANDIDATES", "5000"))
 MAX_DEEP = int(os.environ.get("BP_MAX_DEEP", "50"))
 BATCH_SIZE = int(os.environ.get("BP_BATCH_SIZE", "10"))
 PAUSE_SEC = int(os.environ.get("BP_PAUSE_SEC", "60"))
@@ -341,6 +341,21 @@ def parse_llm_response(response: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+SYSTEM_EVENT_PATTERNS = {
+    "DIALOG_OPENED", "DIALOG_CLOSED", "DIALOG_ASSIGN",
+    "DIALOG_REASSIGN", "DIALOG_ACCEPT", "CHAT_STARTED",
+}
+
+
+def _is_system_event(text: str) -> bool:
+    """Проверяет, является ли сообщение системным событием."""
+    stripped = text.strip().upper()
+    for pat in SYSTEM_EVENT_PATTERNS:
+        if pat in stripped:
+            return True
+    return False
+
+
 def format_dialog(messages: List[Dict[str, Any]]) -> str:
     lines = []
     for msg in messages:
@@ -348,12 +363,16 @@ def format_dialog(messages: List[Dict[str, Any]]) -> str:
         text = str(msg.get("text", "")).strip()
         if not text:
             continue
-        if direction == "system":
-            lines.append(f"\n{text}\n")
-        elif direction == "in":
+        # Фильтруем системные события (экономия ~33% токенов)
+        if _is_system_event(text):
+            continue
+        if direction == "in":
             lines.append(f"Клиент: {text}")
-        else:
+        elif direction == "out":
             lines.append(f"Менеджер: {text}")
+        elif direction == "truncated":
+            lines.append(f"\n{text}\n")
+        # Остальные direction (system, пустой) — пропускаем
     return "\n".join(lines)
 
 
@@ -365,7 +384,7 @@ def smart_truncate(messages: List[Dict[str, Any]], max_messages: int = 50) -> Li
     head = messages[:first_n]
     tail = messages[-last_n:]
     skipped = len(messages) - first_n - last_n
-    return head + [{"direction": "system", "text": f"[...пропущено {skipped} сообщений...]"}] + tail
+    return head + [{"direction": "truncated", "text": f"[...пропущено {skipped} сообщений...]"}] + tail
 
 
 # === Фаза 1: Скрининг ===
@@ -434,9 +453,14 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
         is_successful = str(chat.get("is_successful", "")).lower() in ("true", "1", "да", "yes")
         mgr = chat.get("manager_name", "").strip() or chat.get("manager_id", "").strip()
 
-        # Единственный жёсткий фильтр: должен быть менеджер
+        # Фильтр 1: должен быть менеджер
         if not mgr or mgr == "Неизвестный":
             stats["no_manager"] += 1
+            continue
+
+        # Фильтр 2: менеджер должен был ответить (direction=out)
+        if outbound < MIN_OUTBOUND:
+            stats["low_outbound"] = stats.get("low_outbound", 0) + 1
             continue
 
         # Приоритет: чаты с заказом и успешным исходом получают высший балл
@@ -463,6 +487,7 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
 
     print(f"\n  Результат скрининга:")
     print(f"    Без менеджера: {stats['no_manager']}")
+    print(f"    Мало ответов менеджера (<{MIN_OUTBOUND}): {stats.get('low_outbound', 0)}")
     print(f"    С заказом: {stats['with_order']}")
     print(f"    Успешных: {stats['successful']}")
     print(f"    Прошли фильтр: {stats['passed']}")
@@ -480,7 +505,7 @@ def phase1_screening(ss) -> List[Dict[str, Any]]:
 
 # === Фаза 2: Сбор оценок ===
 
-def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def phase2_analysis(ss, groq: LLMClient, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Собирает все оценки: из analysis_raw + новый LLM анализ для чатов с сообщениями."""
     print(f"\n=== ФАЗА 2: Сбор оценок ({len(candidates)} кандидатов) ===\n")
 
@@ -555,8 +580,8 @@ def phase2_analysis(ss, groq: GroqClient, candidates: List[Dict[str, Any]]) -> L
     print(f"  Кандидатов без оценки (минус resume): {total_remaining}")
     print(f"  Переиспользовано из analysis_raw: {len(results)}")
 
-    # Лимит чатов за один запуск (Railway timeout ~10 мин)
-    MAX_PER_RUN = int(os.environ.get("BP_MAX_PER_RUN", "20"))
+    # Лимит чатов за один запуск
+    MAX_PER_RUN = int(os.environ.get("BP_MAX_PER_RUN", "100"))
     if total_remaining > MAX_PER_RUN:
         print(f"  Ограничиваю до {MAX_PER_RUN} чатов за этот запуск (из {total_remaining})")
         to_analyze = to_analyze[:MAX_PER_RUN]
@@ -721,7 +746,7 @@ def _load_messages_for_chats(ss, chat_ids: set) -> Dict[str, List[Dict]]:
 
 # === Фаза 3: Глубокий анализ топ-N ===
 
-def phase3_deep_analysis(ss, groq: GroqClient, all_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def phase3_deep_analysis(ss, groq: LLMClient, all_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Глубокий анализ топ-N чатов: извлечение конкретных техник и фраз."""
     print(f"\n=== ФАЗА 3: Глубокий анализ топ-{MAX_DEEP} чатов ===\n")
 
