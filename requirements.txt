@@ -9,3 +9,5 @@ flask-cors>=4.0.0
 PyJWT>=2.8.0
 psycopg2-binary>=2.9.0
 bcrypt>=4.0.0
+pytest>=8.0.0
+pytest-mock>=3.12.0
